@@ -1,0 +1,19 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Build output
+client/build
+server/dist
+
+# OS / Editor
+.DS_Store
+.vscode
+.idea
+* text=auto eol=lf
