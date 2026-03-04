@@ -48,7 +48,7 @@ const ProctoringWrapper = ({ children, onViolation }) => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       document.removeEventListener('copy', handleCopy);
     };
-  }, []);
+  }, [onViolation]);
 
   return (
     <>
@@ -61,3 +61,5 @@ const ProctoringWrapper = ({ children, onViolation }) => {
     </>
   );
 };
+
+export default ProctoringWrapper;

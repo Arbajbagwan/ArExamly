@@ -35,7 +35,7 @@ const Navbar = () => {
           <img
             src={logo}
             alt="Exam Portal Logo"
-            className="h-8 object-contain"
+            className="h-6 object-contain"
           />
         </div>
 

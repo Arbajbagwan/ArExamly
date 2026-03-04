@@ -1,4 +1,3 @@
-import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import PrivateRoute from './components/common/PrivateRoute';
 import SessionChecker from './components/common/SessionChecker';

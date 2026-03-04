@@ -1,12 +1,21 @@
 const Subject = require('../models/Subject');
 const Question = require('../models/Question');
 
+const applySubjectOwnerFilter = (req, filter = {}) => {
+  if (req.user.role === 'superuser') {
+    return { ...filter, createdBy: req.user._id };
+  }
+  return filter;
+};
+
 // @desc    Get all subjects
 // @route   GET /api/subjects
 // @access  Private (SuperUser)
 exports.getSubjects = async (req, res, next) => {
   try {
-    const subjects = await Subject.find({ isActive: true })
+    const subjects = await Subject.find(
+      applySubjectOwnerFilter(req, { isActive: true })
+    )
       .populate('createdBy', 'firstname lastname')
       .sort('name');
 
@@ -15,7 +24,8 @@ exports.getSubjects = async (req, res, next) => {
       subjects.map(async (subject) => {
         const questionCount = await Question.countDocuments({
           subject: subject._id,
-          isActive: true
+          isActive: true,
+          ...(req.user.role === 'superuser' ? { createdBy: req.user._id } : {})
         });
         return {
           ...subject.toObject(),
@@ -39,7 +49,9 @@ exports.getSubjects = async (req, res, next) => {
 // @access  Private (SuperUser)
 exports.getSubject = async (req, res, next) => {
   try {
-    const subject = await Subject.findById(req.params.id)
+    const subject = await Subject.findOne(
+      applySubjectOwnerFilter(req, { _id: req.params.id })
+    )
       .populate('createdBy', 'firstname lastname');
 
     if (!subject) {
@@ -73,7 +85,9 @@ exports.createSubject = async (req, res, next) => {
     }
 
     // Check if subject already exists
-    const existingSubject = await Subject.findOne({ name: name.trim() });
+    const existingSubject = await Subject.findOne(
+      applySubjectOwnerFilter(req, { name: name.trim() })
+    );
     if (existingSubject) {
       return res.status(400).json({
         success: false,
@@ -112,7 +126,9 @@ exports.updateSubject = async (req, res, next) => {
   try {
     const { name, description, code, color } = req.body;
 
-    let subject = await Subject.findById(req.params.id);
+    let subject = await Subject.findOne(
+      applySubjectOwnerFilter(req, { _id: req.params.id })
+    );
 
     if (!subject) {
       return res.status(404).json({
@@ -150,7 +166,9 @@ exports.updateSubject = async (req, res, next) => {
 // @access  Private (SuperUser)
 exports.deleteSubject = async (req, res, next) => {
   try {
-    const subject = await Subject.findById(req.params.id);
+    const subject = await Subject.findOne(
+      applySubjectOwnerFilter(req, { _id: req.params.id })
+    );
 
     if (!subject) {
       return res.status(404).json({
@@ -162,7 +180,8 @@ exports.deleteSubject = async (req, res, next) => {
     // Check if any questions are using this subject
     const questionCount = await Question.countDocuments({ 
       subject: req.params.id,
-      isActive: true 
+      isActive: true,
+      ...(req.user.role === 'superuser' ? { createdBy: req.user._id } : {})
     });
 
     if (questionCount > 0) {
@@ -190,9 +209,21 @@ exports.deleteSubject = async (req, res, next) => {
 // @access  Private (SuperUser)
 exports.getSubjectQuestions = async (req, res, next) => {
   try {
+    const subject = await Subject.findOne(
+      applySubjectOwnerFilter(req, { _id: req.params.id, isActive: true })
+    );
+
+    if (!subject) {
+      return res.status(404).json({
+        success: false,
+        message: 'Subject not found'
+      });
+    }
+
     const questions = await Question.find({
       subject: req.params.id,
-      isActive: true
+      isActive: true,
+      ...(req.user.role === 'superuser' ? { createdBy: req.user._id } : {})
     })
       .populate('subject', 'name code color')
       .sort('-createdAt');

@@ -8,8 +8,23 @@ import { attemptService } from '../../services/attemptService';
 import API from '../../services/api';
 import { examService } from '../../services/examService';
 import { useExamContext } from '../../contexts/ExamContext';
+import JSZip from 'jszip';
 
 const Exams = () => {
+  const resolveBackendBase = () => {
+    const apiBase = API.defaults?.baseURL || import.meta.env.VITE_API_URL || '';
+    if (/^https?:\/\//i.test(apiBase)) {
+      return apiBase.replace(/\/api\/?$/, '');
+    }
+    return 'http://localhost:5000';
+  };
+  const backendBase = resolveBackendBase();
+  const toFileUrl = (filePath) => {
+    if (!filePath) return '';
+    if (String(filePath).startsWith('http')) return filePath;
+    return `${backendBase}${filePath}`;
+  };
+
   const {
     exams,
     questions,
@@ -50,6 +65,7 @@ const Exams = () => {
     totalQuestions: '',
     mcqCount: '',
     theoryCount: '',
+    passageCount: '',
     subjectIds: [],        // array of subject _id
     difficulty: '',        // '', 'easy', 'medium', 'hard'
     topic: '',             // optional text filter
@@ -63,6 +79,10 @@ const Exams = () => {
     scheduledDate: '',
     startTime: '',
     endTime: '',
+    customInstructionsText: '',
+    instructionPdfFile: null,
+    instructionPdf: '',
+    removeInstructionPdf: false,
     shuffleQuestions: false,
     shuffleOptions: false,
   });
@@ -93,7 +113,8 @@ const Exams = () => {
     return {
       total: filtered.length,
       mcq: filtered.filter(q => q.type === 'mcq').length,
-      theory: filtered.filter(q => q.type === 'theory').length
+      theory: filtered.filter(q => q.type === 'theory').length,
+      passage: filtered.filter(q => q.type === 'passage').length
     };
   }, [questions, autoPickForm.subjectIds, autoPickForm.difficulty, autoPickForm.topic]);
 
@@ -105,6 +126,7 @@ const Exams = () => {
   // if split enabled, mcq and theory should never exceed total and pool
   const maxMcqAllowed = totalSelected ? Math.min(totalSelected, poolCounts.mcq) : poolCounts.mcq;
   const maxTheoryAllowed = totalSelected ? Math.min(totalSelected, poolCounts.theory) : poolCounts.theory;
+  const maxPassageAllowed = totalSelected ? Math.min(totalSelected, poolCounts.passage) : poolCounts.passage;
 
   const onTotalChange = (value) => {
     const n = toInt(value);
@@ -119,21 +141,34 @@ const Exams = () => {
       // If not split, just set total
       if (!p.useSplit) return { ...p, totalQuestions: clampedTotal };
 
-      // If split: clamp mcq and auto-fix theory so mcq+theory = total
+      // If split: clamp all three counts to available pool/total
       const currentMcq = toInt(p.mcqCount) ?? 0;
+      const currentTheory = toInt(p.theoryCount) ?? 0;
+      const currentPassage = toInt(p.passageCount) ?? 0;
+
       const mcq = clamp(currentMcq, 0, Math.min(clampedTotal, poolCounts.mcq));
+      const theory = clamp(currentTheory, 0, Math.min(clampedTotal, poolCounts.theory));
+      const passage = clamp(currentPassage, 0, Math.min(clampedTotal, poolCounts.passage));
 
-      // theory = total - mcq, but must not exceed poolCounts.theory
-      let theory = clampedTotal - mcq;
-      if (theory > poolCounts.theory) {
-        // if theory exceeds available, reduce mcq to allow theory to fit
-        const maxTheoryPossible = poolCounts.theory;
-        theory = maxTheoryPossible;
-        const newMcq = clampedTotal - theory;
-        return { ...p, totalQuestions: clampedTotal, mcqCount: newMcq, theoryCount: theory };
+      const sum = mcq + theory + passage;
+      if (sum <= clampedTotal) {
+        return { ...p, totalQuestions: clampedTotal, mcqCount: mcq, theoryCount: theory, passageCount: passage };
       }
-
-      return { ...p, totalQuestions: clampedTotal, mcqCount: mcq, theoryCount: theory };
+      // Reduce passage first, then theory, then mcq
+      let overflow = sum - clampedTotal;
+      let newPassage = passage;
+      let newTheory = theory;
+      let newMcq = mcq;
+      const cutPassage = Math.min(newPassage, overflow);
+      newPassage -= cutPassage;
+      overflow -= cutPassage;
+      if (overflow > 0) {
+        const cutTheory = Math.min(newTheory, overflow);
+        newTheory -= cutTheory;
+        overflow -= cutTheory;
+      }
+      if (overflow > 0) newMcq = Math.max(0, newMcq - overflow);
+      return { ...p, totalQuestions: clampedTotal, mcqCount: newMcq, theoryCount: newTheory, passageCount: newPassage };
     });
   };
 
@@ -153,19 +188,7 @@ const Exams = () => {
     }
 
     const mcq = clamp(mcqRaw ?? 0, 0, Math.min(total, poolCounts.mcq));
-
-    // theory = total - mcq, but cannot exceed available theory
-    let theory = total - mcq;
-
-    if (theory > poolCounts.theory) {
-      // not enough theory available => force mcq lower so theory fits
-      theory = poolCounts.theory;
-      const newMcq = total - theory;
-      setAutoPickForm((p) => ({ ...p, mcqCount: newMcq, theoryCount: theory }));
-      return;
-    }
-
-    setAutoPickForm((p) => ({ ...p, mcqCount: mcq, theoryCount: theory }));
+    setAutoPickForm((p) => ({ ...p, mcqCount: mcq }));
   };
 
   const openAutoPickModal = (exam) => {
@@ -187,13 +210,14 @@ const Exams = () => {
       : [];
 
     // Decide split based on existing config (or keep previous choice)
-    const splitFromConfig = (Number(rc.mcqCount || 0) + Number(rc.theoryCount || 0)) > 0;
+    const splitFromConfig = (Number(rc.mcqCount || 0) + Number(rc.theoryCount || 0) + Number(rc.passageCount || 0)) > 0;
 
     setAutoPickForm({
       useSplit: splitFromConfig,
       totalQuestions: rc.totalQuestions ?? '',
       mcqCount: rc.mcqCount ?? '',
       theoryCount: rc.theoryCount ?? '',
+      passageCount: rc.passageCount ?? '',
       subjectIds: normalizedSubjectIds,
       difficulty: rc.difficulty ?? '',
       topic: rc.topic ?? '',
@@ -232,13 +256,15 @@ const Exams = () => {
 
     let mcq = 0;
     let theory = 0;
+    let passage = 0;
 
     if (useSplit) {
       mcq = toInt(autoPickForm.mcqCount) ?? 0;
       theory = toInt(autoPickForm.theoryCount) ?? 0;
+      passage = toInt(autoPickForm.passageCount) ?? 0;
 
-      if (mcq + theory !== total) {
-        alert('MCQ + Theory must equal Total Questions');
+      if (mcq + theory + passage !== total) {
+        alert('MCQ + Theory + Passage must equal Total Questions');
         return;
       }
     }
@@ -253,6 +279,10 @@ const Exams = () => {
         alert(`Only ${poolCounts.theory} Theory questions available`);
         return;
       }
+      if (passage > poolCounts.passage) {
+        alert(`Only ${poolCounts.passage} Passage questions available`);
+        return;
+      }
     }
 
     try {
@@ -262,6 +292,7 @@ const Exams = () => {
         totalQuestions: total,
         mcqCount: mcq,
         theoryCount: theory,
+        passageCount: passage,
         subjectIds: autoPickForm.subjectIds, // already string ids
         difficulty: autoPickForm.difficulty || undefined,
         topic: autoPickForm.topic || undefined,
@@ -289,7 +320,7 @@ const Exams = () => {
 
     if (exam.selectionMode === 'random') {
       const rc = exam.randomConfig || {};
-      if ((rc.mcqCount || 0) + (rc.theoryCount || 0) > 0) {
+      if ((rc.mcqCount || 0) + (rc.theoryCount || 0) + (rc.passageCount || 0) > 0) {
         return 'split';
       }
       return 'any';
@@ -313,16 +344,23 @@ const Exams = () => {
     }
 
     const theory = clamp(theoryRaw ?? 0, 0, Math.min(total, poolCounts.theory));
-    let mcq = total - theory;
+    setAutoPickForm((p) => ({ ...p, theoryCount: theory }));
+  };
 
-    if (mcq > poolCounts.mcq) {
-      mcq = poolCounts.mcq;
-      const newTheory = total - mcq;
-      setAutoPickForm((p) => ({ ...p, mcqCount: mcq, theoryCount: newTheory }));
+  const onPassageChange = (value) => {
+    const passageRaw = toInt(value);
+    const total = toInt(autoPickForm.totalQuestions);
+
+    if (!autoPickForm.useSplit) {
+      setAutoPickForm((p) => ({ ...p, passageCount: '' }));
       return;
     }
-
-    setAutoPickForm((p) => ({ ...p, mcqCount: mcq, theoryCount: theory }));
+    if (!total) {
+      alert('Set Total Questions first');
+      return;
+    }
+    const passage = clamp(passageRaw ?? 0, 0, Math.min(total, poolCounts.passage));
+    setAutoPickForm((p) => ({ ...p, passageCount: passage }));
   };
 
   const resetForm = () => {
@@ -333,6 +371,10 @@ const Exams = () => {
       scheduledDate: '',
       startTime: '',
       endTime: '',
+      customInstructionsText: '',
+      instructionPdfFile: null,
+      instructionPdf: '',
+      removeInstructionPdf: false,
       shuffleQuestions: false,
       shuffleOptions: false,
     });
@@ -354,10 +396,20 @@ const Exams = () => {
     setFormLoading(true);
 
     try {
-      const examData = {
-        ...formData,
-        duration: Number(formData.duration)
-      };
+      const examData = new FormData();
+      examData.append('title', formData.title || '');
+      examData.append('description', formData.description || '');
+      examData.append('duration', Number(formData.duration));
+      examData.append('scheduledDate', formData.scheduledDate || '');
+      examData.append('startTime', formData.startTime || '');
+      examData.append('endTime', formData.endTime || '');
+      examData.append('customInstructions', formData.customInstructionsText || '');
+      examData.append('shuffleQuestions', String(!!formData.shuffleQuestions));
+      examData.append('shuffleOptions', String(!!formData.shuffleOptions));
+      examData.append('removeInstructionPdf', String(!!formData.removeInstructionPdf));
+      if (formData.instructionPdfFile) {
+        examData.append('instructionPdfFile', formData.instructionPdfFile);
+      }
 
       if (editingId) {
         await examService.updateExam(editingId, examData);
@@ -381,6 +433,13 @@ const Exams = () => {
       scheduledDate: exam.scheduledDate ? exam.scheduledDate.split('T')[0] : '',
       startTime: exam.startTime || '',
       endTime: exam.endTime || '',
+      customInstructionsText: [
+        ...(exam.instructions ? String(exam.instructions).split('\n') : []),
+        ...(Array.isArray(exam.customInstructions) ? exam.customInstructions : [])
+      ].map((x) => String(x).trim()).filter(Boolean).join('\n'),
+      instructionPdfFile: null,
+      instructionPdf: exam.instructionPdf || '',
+      removeInstructionPdf: false,
       shuffleQuestions: !!exam.shuffleQuestions,
       shuffleOptions: !!exam.shuffleOptions,
     });
@@ -487,24 +546,6 @@ const Exams = () => {
         return [...prev, examineeId];
       }
     });
-  };
-
-  // Select all questions
-  const selectAllQuestions = () => {
-    if (selectedQuestions.length === questions.length) {
-      setSelectedQuestions([]);
-    } else {
-      setSelectedQuestions(questions.map(q => q._id));
-    }
-  };
-
-  // Select all examinees
-  const selectAllExaminees = () => {
-    if (selectedExaminees.length === examinees.length) {
-      setSelectedExaminees([]);
-    } else {
-      setSelectedExaminees(examinees.map(e => e._id));
-    }
   };
 
   // Save assigned questions
@@ -762,14 +803,51 @@ const Exams = () => {
   };
 
   const updateEvaluation = (questionId, data) => {
+    const key = data.subQuestionId ? `${questionId}:${data.subQuestionId}` : questionId;
     setEvaluationMap((prev) => ({
       ...prev,
-      [questionId]: {
+      [key]: {
         questionId,
-        ...(prev[questionId] || {}),
+        ...(prev[key] || {}),
         ...data
       }
     }));
+  };
+
+  const handleDownloadAllPDFs = async () => {
+    if (!selectedExam?.resultMap) return;
+    const evaluated = Object.values(selectedExam.resultMap).filter(
+      (r) => r.status === 'evaluated' && r.attemptId
+    );
+    if (evaluated.length === 0) {
+      alert('No evaluated attempts available for PDF download.');
+      return;
+    }
+
+    const zip = new JSZip();
+
+    for (const result of evaluated) {
+      const user = (selectedExam.assignedTo || []).find(
+        (e) => e._id && selectedExam.resultMap[e._id]?.attemptId === result.attemptId
+      );
+      const username = user?.username || 'examinee';
+      // Sequential fetch keeps memory predictable
+      const res = await API.get(`/attempts/${result.attemptId}/pdf`, {
+        responseType: 'blob'
+      });
+      const filename = `${username}_${selectedExam.title}_result.pdf`.replace(/\s+/g, '_');
+      zip.file(filename, res.data);
+    }
+
+    const zipBlob = await zip.generateAsync({ type: 'blob' });
+    const url = window.URL.createObjectURL(zipBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${selectedExam.title || 'exam'}_results_pdfs.zip`.replace(/\s+/g, '_');
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
   };
 
   const submitEvaluation = async () => {
@@ -904,6 +982,9 @@ const Exams = () => {
 
                           </div>
                         </div>
+                        <div className="mt-2 text-xs text-emerald-700 bg-emerald-50 px-3 py-1 rounded inline-flex items-center">
+                          Completed: {exam.completedUsersCount || 0}
+                        </div>
 
                         {/* Date and Time Info */}
                         {exam.scheduledDate && (
@@ -963,12 +1044,14 @@ const Exams = () => {
                           >
                             👁️ View
                           </button>
-                          <button
-                            onClick={() => downloadResults(exam._id, exam.title)}
-                            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium text-sm transition shadow-md flex items-center gap-2"
-                          >
-                            Download Results
-                          </button>
+                          {(exam.completedUsersCount || 0) > 0 && (
+                            <button
+                              onClick={() => downloadResults(exam._id, exam.title)}
+                              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium text-sm transition shadow-md flex items-center gap-2"
+                            >
+                              Download Results
+                            </button>
+                          )}
                           <button
                             onClick={() => openQuestionsModal(exam)}
                             className="px-3 py-1.5 text-sm text-purple-600 hover:bg-purple-50 rounded-lg transition-colors"
@@ -1073,6 +1156,57 @@ const Exams = () => {
               value={formData.description}
               onChange={(e) => setFormData({ ...formData, description: e.target.value })}
             />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Extra Instructions (one per line)</label>
+            <textarea
+              placeholder="Line 1&#10;Line 2&#10;Line 3"
+              rows="4"
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none resize-none"
+              value={formData.customInstructionsText}
+              onChange={(e) => setFormData({ ...formData, customInstructionsText: e.target.value })}
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Instruction PDF</label>
+            <input
+              type="file"
+              accept="application/pdf"
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+              onChange={(e) => setFormData({
+                ...formData,
+                instructionPdfFile: e.target.files?.[0] || null,
+                removeInstructionPdf: false
+              })}
+            />
+            {formData.instructionPdf && !formData.instructionPdfFile && (
+              <div className="mt-2 space-y-2">
+                <a
+                  href={toFileUrl(formData.instructionPdf)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-blue-600 hover:underline"
+                >
+                  Current PDF: {formData.instructionPdf.split('/').pop()}
+                </a>
+                {editingId && (
+                  <label className="flex items-center gap-2 text-xs text-red-700">
+                    <input
+                      type="checkbox"
+                      checked={!!formData.removeInstructionPdf}
+                      onChange={(e) => setFormData((p) => ({
+                        ...p,
+                        removeInstructionPdf: e.target.checked,
+                        instructionPdfFile: e.target.checked ? null : p.instructionPdfFile
+                      }))}
+                    />
+                    Remove current PDF
+                  </label>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1500,6 +1634,22 @@ const Exams = () => {
               </div>
             </div>
 
+            <div className="bg-gray-50 p-4 rounded-lg">
+              <h4 className="font-medium text-gray-800 mb-2">Instruction PDF</h4>
+              {selectedExam.instructionPdf ? (
+                <a
+                  href={toFileUrl(selectedExam.instructionPdf)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm text-blue-600 hover:underline"
+                >
+                  View/Download: {selectedExam.instructionPdf.split('/').pop()}
+                </a>
+              ) : (
+                <p className="text-sm text-gray-500">No PDF uploaded.</p>
+              )}
+            </div>
+
             {/* Assigned Questions */}
             <div>
               <h4 className="font-medium text-gray-800 mb-3">Assigned Questions ({selectedExam.questions?.length || 0})</h4>
@@ -1533,7 +1683,17 @@ const Exams = () => {
 
             {/* Assigned Examinees */}
             <div>
-              <h4 className="font-medium text-gray-800 mb-3">Assigned Examinees ({selectedExam.assignedTo?.length || 0})</h4>
+              <div className="flex items-center justify-between mb-3">
+                <h4 className="font-medium text-gray-800">Assigned Examinees ({selectedExam.assignedTo?.length || 0})</h4>
+                {Object.values(selectedExam.resultMap || {}).some((r) => r.status === 'evaluated') && (
+                  <button
+                    onClick={handleDownloadAllPDFs}
+                    className="px-3 py-1 text-xs bg-purple-600 text-white rounded hover:bg-purple-700"
+                  >
+                    Download All PDFs
+                  </button>
+                )}
+              </div>
               {selectedExam.assignedTo?.length > 0 ? (
                 <div className="flex flex-wrap gap-2">
                   <div className="space-y-2">
@@ -1659,6 +1819,7 @@ const Exams = () => {
                   useSplit: false,
                   mcqCount: '',
                   theoryCount: '',
+                  passageCount: '',
                 }))
               }
             />
@@ -1676,15 +1837,16 @@ const Exams = () => {
                   useSplit: true,
                   mcqCount: p.mcqCount === '' ? 0 : p.mcqCount,
                   theoryCount: p.theoryCount === '' ? 0 : p.theoryCount,
+                  passageCount: p.passageCount === '' ? 0 : p.passageCount,
                 }))
               }
             />
-            <span>Split (MCQ + Theory must equal Total)</span>
+            <span>Split (MCQ + Theory + Passage must equal Total)</span>
           </label>
         </div>
         <div className="space-y-4">
           {/* Numbers */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Total Questions</label>
               <input
@@ -1696,7 +1858,7 @@ const Exams = () => {
                 onChange={(e) => onTotalChange(e.target.value)}
               />
               <p className="text-xs text-gray-500 mt-1">
-                Available: {poolCounts.total} (MCQ {poolCounts.mcq}, Theory {poolCounts.theory})
+                Available: {poolCounts.total} (MCQ {poolCounts.mcq}, Theory {poolCounts.theory}, Passage {poolCounts.passage})
               </p>
             </div>
 
@@ -1731,6 +1893,23 @@ const Exams = () => {
               />
               <p className="text-xs text-gray-500 mt-1">
                 Max: {maxTheoryAllowed} (pool Theory: {poolCounts.theory})
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Passage Count</label>
+              <input
+                type="number"
+                min="0"
+                max={maxPassageAllowed}
+                disabled={!autoPickForm.useSplit}
+                className={`w-full px-4 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 ${!autoPickForm.useSplit ? 'bg-gray-100 cursor-not-allowed' : ''
+                  }`}
+                value={autoPickForm.passageCount}
+                onChange={(e) => onPassageChange(e.target.value)}
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Max: {maxPassageAllowed} (pool Passage: {poolCounts.passage})
               </p>
             </div>
           </div>
@@ -1813,8 +1992,8 @@ const Exams = () => {
 
           {/* Info */}
           <div className="p-3 rounded-lg bg-blue-50 text-blue-700 text-sm">
-            Tip: If you want “any type” random selection, set MCQ=0 and Theory=0.
-            If you want a fixed split, MCQ + Theory must equal Total.
+            Tip: If you want any-type random selection, keep split off.
+            If you want a fixed split, MCQ + Theory + Passage must equal Total.
           </div>
 
           {/* Actions */}
@@ -1864,54 +2043,79 @@ const Exams = () => {
 
             {/* Theory Questions */}
             <div className="space-y-4 max-h-[60vh] overflow-y-auto">
-              {evaluatingAttempt.answers
-                .filter(a => a.question?.type === 'theory')
-                .map((ans, index) => (
-                  <div
-                    key={ans.question._id}
-                    className="border border-gray-200 rounded-lg p-4"
-                  >
-                    <p className="font-medium text-gray-800">
-                      Q{index + 1}. {ans.question.question}
-                    </p>
+              {[
+                ...evaluatingAttempt.answers
+                  .filter(a => a.question?.type === 'theory')
+                  .map((ans) => ({
+                    key: ans.question._id,
+                    questionId: ans.question._id,
+                    prompt: ans.question.question,
+                    maxMarks: ans.question.credit,
+                    textAnswer: ans.textAnswer || '',
+                    existingMarks: ans.marksObtained ?? ''
+                  })),
+                ...evaluatingAttempt.answers
+                  .filter(a => a.question?.type === 'passage')
+                  .flatMap((ans) =>
+                    (ans.question?.subQuestions || [])
+                      .filter((sq) => sq.type === 'theory')
+                      .map((sq) => {
+                        const resp = (ans.passageResponses || []).find((r) => String(r.subQuestionId) === String(sq._id));
+                        return {
+                          key: `${ans.question._id}-${sq._id}`,
+                          questionId: ans.question._id,
+                          subQuestionId: sq._id,
+                          prompt: `${ans.question.question} | ${sq.prompt}`,
+                          maxMarks: sq.credit,
+                          textAnswer: resp?.textAnswer || '',
+                          existingMarks: resp?.marksObtained ?? ''
+                        };
+                      })
+                  )
+              ].map((item, index) => (
+                <div key={item.key} className="border border-gray-200 rounded-lg p-4">
+                  <p className="font-medium text-gray-800">
+                    Q{index + 1}. {item.prompt}
+                  </p>
 
-                    <p className="text-xs text-gray-500 mt-1">
-                      Max Marks: {ans.question.credit}
-                    </p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Max Marks: {item.maxMarks}
+                  </p>
 
-                    {/* Student Answer */}
-                    <div className="mt-3 bg-gray-100 p-3 rounded text-sm text-gray-700 whitespace-pre-wrap">
-                      {ans.textAnswer || '— No answer submitted —'}
-                    </div>
-
-                    {/* Evaluation Inputs */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
-                      <input
-                        type="number"
-                        min="0"
-                        max={ans.question.credit}
-                        placeholder={`Marks (0 - ${ans.question.credit})`}
-                        className="px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                        onChange={(e) =>
-                          updateEvaluation(ans.question._id, {
-                            marksObtained: Number(e.target.value)
-                          })
-                        }
-                      />
-
-                      <input
-                        type="text"
-                        placeholder="Feedback (optional)"
-                        className="px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                        onChange={(e) =>
-                          updateEvaluation(ans.question._id, {
-                            feedback: e.target.value
-                          })
-                        }
-                      />
-                    </div>
+                  <div className="mt-3 bg-gray-100 p-3 rounded text-sm text-gray-700 whitespace-pre-wrap">
+                    {item.textAnswer || 'No answer submitted'}
                   </div>
-                ))}
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
+                    <input
+                      type="number"
+                      min="0"
+                      max={item.maxMarks}
+                      placeholder={`Marks (0 - ${item.maxMarks})`}
+                      defaultValue={item.existingMarks}
+                      className="px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                      onChange={(e) =>
+                        updateEvaluation(item.questionId, {
+                          ...(item.subQuestionId ? { subQuestionId: item.subQuestionId } : {}),
+                          marksObtained: Number(e.target.value)
+                        })
+                      }
+                    />
+
+                    <input
+                      type="text"
+                      placeholder="Feedback (optional)"
+                      className="px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                      onChange={(e) =>
+                        updateEvaluation(item.questionId, {
+                          ...(item.subQuestionId ? { subQuestionId: item.subQuestionId } : {}),
+                          feedback: e.target.value
+                        })
+                      }
+                    />
+                  </div>
+                </div>
+              ))}
             </div>
 
             {/* Actions */}
@@ -1945,3 +2149,6 @@ const Exams = () => {
 };
 
 export default Exams;
+
+
+

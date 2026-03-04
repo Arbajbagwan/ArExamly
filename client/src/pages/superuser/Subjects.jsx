@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState } from 'react';
 import Navbar from '../../components/common/Navbar';
 import Sidebar from '../../components/common/Sidebar';
 import Modal from '../../components/common/Modal';
@@ -24,7 +24,6 @@ const Subjects = () => {
   const [showModal, setShowModal] = useState(false);
   const [formLoading, setFormLoading] = useState(false);
   const [editingId, setEditingId] = useState(null);
-  const [search, setSearch] = useState('');
 
   const [formData, setFormData] = useState({
     name: '',
@@ -32,13 +31,6 @@ const Subjects = () => {
     code: '',
     color: '#3B82F6'
   });
-
-  const filteredSubjects = useMemo(() => {
-    if (!search) return subjects;
-    return subjects.filter(s =>
-      s.name.toLowerCase().includes(search.toLowerCase())
-    );
-  }, [subjects, search]);
 
   const resetForm = () => {
     setFormData({
@@ -129,7 +121,7 @@ const Subjects = () => {
 
             {/* Subject Cards */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {filteredSubjects.length === 0 ? (
+              {subjects.length === 0 ? (
                 <div className="col-span-full bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center">
                   <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
                     <span className="text-3xl">📚</span>
@@ -141,7 +133,7 @@ const Subjects = () => {
                   </button>
                 </div>
               ) : (
-                filteredSubjects.map((subject) => (
+                subjects.map((subject) => (
                   <div
                     key={subject._id}
                     className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden hover:shadow-md transition-shadow"

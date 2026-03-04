@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import React, { createContext, useState, useEffect } from 'react';
 import API from '../services/api';
 import { authService } from '../services/authService';
@@ -18,7 +19,7 @@ export const AuthProvider = ({ children }) => {
       try {
         const { data } = await API.get('/auth/me');
         setUser(data.user);
-      } catch (error) {
+      } catch {
         localStorage.removeItem('token');
         localStorage.removeItem('user');
       }

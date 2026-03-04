@@ -200,6 +200,20 @@ exports.parseQuestionsExcel = (filePath) => {
           : 'medium'
       };
 
+      const passageText = String(row.passage || '').trim();
+      if (passageText) {
+        const complexity = String(row.passageComplexity || 'simple').trim().toLowerCase();
+        question.passage = {
+          title: String(row.passageTitle || '').trim(),
+          text: passageText,
+          topic: String(row.passageTopic || '').trim(),
+          marksLabel: String(row.passageMarks || '').trim(),
+          complexity: ['simple', 'moderate', 'complex'].includes(complexity)
+            ? complexity
+            : 'simple'
+        };
+      }
+
       // ---------- MCQ LOGIC ----------
       if (type === 'mcq') {
         // Collect option columns dynamically

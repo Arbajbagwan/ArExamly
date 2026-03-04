@@ -9,12 +9,12 @@ import { useExamContext } from '../../contexts/ExamContext';
 
 const Examinees = () => {
   const { examinees, refreshExaminees, isReady } = useExamContext();
-  const [search, setSearch] = useState('');
   const [showModal, setShowModal] = useState(false);
   const [formLoading, setFormLoading] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [selectedUsers, setSelectedUsers] = useState([]);
   const [showBulkModal, setShowBulkModal] = useState(false);
+  const [lastBulkSummary, setLastBulkSummary] = useState(null);
   const [filters, setFilters] = useState({
     search: '',
     status: ''
@@ -186,6 +186,25 @@ const Examinees = () => {
             </div>
 
             {/* Filter */}
+            {lastBulkSummary && (
+              <div className="mb-4 p-4 rounded-lg border border-blue-200 bg-blue-50 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                <p className="text-sm text-blue-800">
+                  Bulk upload done. Created: <b>{lastBulkSummary.created ?? 0}</b>, Skipped: <b>{lastBulkSummary.skipped ?? 0}</b>, Total: <b>{lastBulkSummary.total ?? 0}</b>.
+                  {' '}If list is not updated yet, click refresh.
+                </p>
+                <button
+                  onClick={async () => {
+                    await refreshExaminees();
+                    setLastBulkSummary(null);
+                  }}
+                  className="px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700"
+                >
+                  Refresh Users
+                </button>
+              </div>
+            )}
+
+            {/* Filter */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6">
               <div className="flex flex-wrap items-center gap-4">
                 {/* Search */}
@@ -231,7 +250,7 @@ const Examinees = () => {
                         onClick={handleBulkDelete}
                         className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
                       >
-                        Delete Selected
+                        De-Activate Selected
                       </button>
                     )}
 
@@ -465,9 +484,16 @@ const Examinees = () => {
       >
         <BulkUpload
           type="examinees"
-          onSuccess={() => {
-            setShowBulkModal(false);
-            refreshExaminees();
+          onSuccess={async (summary) => {
+            const total = Number(summary?.total || 0);
+            setLastBulkSummary(summary || null);
+            // For small uploads, refresh immediately; for large uploads, let user refresh manually.
+            if (total > 0 && total <= 200) {
+              await refreshExaminees();
+              setLastBulkSummary(null);
+            } else {
+              setShowBulkModal(false);
+            }
           }}
         />
       </Modal>

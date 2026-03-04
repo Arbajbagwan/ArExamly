@@ -1,5 +1,9 @@
+if (!process.env.JWT_SECRET && process.env.NODE_ENV === 'production') {
+  throw new Error('JWT_SECRET is required in production');
+}
+
 module.exports = {
-  JWT_SECRET: process.env.JWT_SECRET || 'your-secret-key-change-in-production',
+  JWT_SECRET: process.env.JWT_SECRET || 'dev-jwt-secret-change-me',
   JWT_EXPIRE: process.env.JWT_EXPIRE || '7d',
   JWT_COOKIE_EXPIRE: process.env.JWT_COOKIE_EXPIRE || 7,
   NODE_ENV: process.env.NODE_ENV || 'development',

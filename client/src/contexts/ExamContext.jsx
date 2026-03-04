@@ -1,4 +1,6 @@
+/* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { useCallback } from "react";
 import { examService } from "../services/examService";
 import { questionService } from "../services/questionService";
 import { subjectService } from "../services/subjectService";
@@ -19,28 +21,28 @@ export const ExamProvider = ({ children }) => {
   const [error, setError] = useState(null);
 
   // ---------- INDIVIDUAL FETCHERS ----------
-  const fetchExams = async () => {
+  const fetchExams = useCallback(async () => {
     const res = await examService.getExams();
     setExams(res.exams || []);
-  };
+  }, []);
 
-  const fetchQuestions = async () => {
+  const fetchQuestions = useCallback(async () => {
     const res = await questionService.getQuestions();
     setQuestions(res.questions || []);
-  };
+  }, []);
 
-  const fetchSubjects = async () => {
+  const fetchSubjects = useCallback(async () => {
     const res = await subjectService.getSubjects();
     setSubjects(res.subjects || []);
-  };
+  }, []);
 
-  const fetchExaminees = async () => {
+  const fetchExaminees = useCallback(async () => {
     const res = await userService.getUsers();
     setExaminees(res.users || []);
-  };
+  }, []);
 
   // ---------- INITIAL LOAD (ONLY ONCE) ----------
-  const fetchAll = async () => {
+  const fetchAll = useCallback(async () => {
     try {
       setError(null);
 
@@ -56,14 +58,14 @@ export const ExamProvider = ({ children }) => {
     } finally {
       setIsReady(true); // 🔑 GUARANTEED loader exit
     }
-  };
+  }, [fetchExaminees, fetchExams, fetchQuestions, fetchSubjects]);
 
   useEffect(() => {
     if (fetchedRef.current) return; // 🔒 prevents double fetch in StrictMode
     fetchedRef.current = true;
 
     fetchAll();
-  }, []);
+  }, [fetchAll]);
 
   // ---------- CONTEXT VALUE ----------
   const value = {

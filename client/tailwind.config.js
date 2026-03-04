@@ -8,9 +8,7 @@ export default {
   theme: {
     extend: {},
   },
-  plugins: [
-    require('daisyui')
-  ],
+  plugins: [],
   daisyui: {
     themes: ["light", "dark", "corporate"], // we use "corporate" as default
     darkTheme: "dark",

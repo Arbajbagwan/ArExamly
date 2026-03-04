@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import Navbar from '../../components/common/Navbar';
 import Sidebar from '../../components/common/Sidebar';
 import Modal from '../../components/common/Modal';
@@ -6,13 +6,32 @@ import Loader from '../../components/common/Loader';
 import BulkUpload from '../../components/superuser/BulkUpload';
 import { useExamContext } from '../../contexts/ExamContext';
 import { questionService } from '../../services/questionService';
+import { passageService } from '../../services/passageService';
 
 const Questions = () => {
-  const { questions, subjects, refreshQuestions } = useExamContext();
+  const { questions, subjects, refreshQuestions, refreshSubjects } = useExamContext();
   const [showModal, setShowModal] = useState(false);
   const [showBulkModal, setShowBulkModal] = useState(false);
+  const [showPassageModal, setShowPassageModal] = useState(false);
   const [formLoading, setFormLoading] = useState(false);
   const [editingId, setEditingId] = useState(null);
+  const [passages, setPassages] = useState([]);
+  const [passageForm, setPassageForm] = useState({
+    title: '',
+    text: '',
+    topic: '',
+    complexity: 'simple',
+    marksLabel: ''
+  });
+
+  const loadPassages = async () => {
+    try {
+      const res = await passageService.getPassages();
+      setPassages(res.passages || []);
+    } catch {
+      setPassages([]);
+    }
+  };
 
   // Filters
   const [filters, setFilters] = useState({
@@ -29,7 +48,9 @@ const Questions = () => {
       if (filters.difficulty && q.difficulty !== filters.difficulty) return false;
       if (
         filters.search &&
-        !(q.question || '').toLowerCase().includes(filters.search.toLowerCase())
+        !`${q.question || ''} ${q.passageRef?.title || ''} ${q.passageRef?.topic || ''}`
+          .toLowerCase()
+          .includes(filters.search.toLowerCase())
       ) return false;
       return true;
     });
@@ -44,8 +65,25 @@ const Questions = () => {
     subject: '',
     topic: 'General',
     difficulty: 'medium',
-    explanation: ''
+    explanation: '',
+    passageRef: '',
+    subQuestions: []
   });
+
+  useEffect(() => {
+    if (formData.type !== 'passage') return;
+    const total = (formData.subQuestions || []).reduce((sum, sq) => sum + Number(sq.credit || 0), 0);
+    if (formData.credit !== total) {
+      setFormData((prev) => ({ ...prev, credit: total }));
+    }
+  }, [formData.type, formData.subQuestions, formData.credit]);
+
+  useEffect(() => {
+    if (!showModal) return;
+    if (formData.type !== 'passage') return;
+    if (passages.length > 0) return;
+    loadPassages();
+  }, [showModal, formData.type, passages.length]);
 
   const resetForm = () => {
     setFormData({
@@ -57,7 +95,9 @@ const Questions = () => {
       subject: subjects.length > 0 ? subjects[0]._id : '',
       topic: 'General',
       difficulty: 'medium',
-      explanation: ''
+      explanation: '',
+      passageRef: '',
+      subQuestions: []
     });
     setEditingId(null);
   };
@@ -82,16 +122,34 @@ const Questions = () => {
 
     try {
       const payload = { ...formData };
+      if (!payload.passageRef) payload.passageRef = null;
       if (payload.type === 'mcq') {
-        payload.options = payload.options.filter(opt => opt.trim() !== '');
+        payload.options = (payload.options || []).map((opt) => String(opt || '').trim()).filter(opt => opt !== '');
         if (payload.options.length < 2) {
           alert('Please provide at least 2 options for MCQ');
           setFormLoading(false);
           return;
         }
+        if (payload.correctOption >= payload.options.length) {
+          payload.correctOption = 0;
+        }
       } else {
         delete payload.options;
         delete payload.correctOption;
+      }
+      if (payload.type === 'passage') {
+        if (!payload.passageRef) {
+          alert('Please select a passage');
+          setFormLoading(false);
+          return;
+        }
+        if (!Array.isArray(payload.subQuestions) || payload.subQuestions.length === 0) {
+          alert('Please add at least one sub question');
+          setFormLoading(false);
+          return;
+        }
+      } else {
+        delete payload.subQuestions;
       }
 
       if (editingId) {
@@ -100,7 +158,7 @@ const Questions = () => {
         await questionService.createQuestion(payload);
       }
       closeModal();
-      refreshQuestions();
+      await Promise.all([refreshQuestions(), refreshSubjects()]);
     } catch (error) {
       alert(error.response?.data?.message || 'Operation failed');
     } finally {
@@ -108,9 +166,12 @@ const Questions = () => {
     }
   };
 
-  const handleEdit = (question) => {
-    const options = question.options || ['', '', '', ''];
-    while (options.length < 4) options.push('');
+  const handleEdit = async (question) => {
+    if (question.type === 'passage' && passages.length === 0) {
+      await loadPassages();
+    }
+
+    const options = question.options || ['', ''];
 
     setFormData({
       type: question.type || 'mcq',
@@ -121,7 +182,9 @@ const Questions = () => {
       difficulty: question.difficulty || 'medium',
       options: options,
       correctOption: question.correctOption || 0,
-      explanation: question.explanation || ''
+      explanation: question.explanation || '',
+      passageRef: question.passageRef?._id || '',
+      subQuestions: question.subQuestions || []
     });
     setEditingId(question._id);
     setShowModal(true);
@@ -132,7 +195,7 @@ const Questions = () => {
 
     try {
       await questionService.deleteQuestion(id);
-      refreshQuestions();
+      await Promise.all([refreshQuestions(), refreshSubjects()]);
     } catch (error) {
       alert(error.response?.data?.message || 'Delete failed');
     }
@@ -147,16 +210,6 @@ const Questions = () => {
     });
   };
 
-  const getSubjectColor = (subjectId) => {
-    const subject = subjects.find(s => s._id === subjectId || s._id === subjectId?._id);
-    return subject?.color || '#6B7280';
-  };
-
-  const getSubjectName = (subjectId) => {
-    const subject = subjects.find(s => s._id === subjectId || s._id === subjectId?._id);
-    return subject?.name || 'Unknown';
-  };
-
   const getDifficultyColor = (difficulty) => {
     const colors = {
       easy: 'bg-green-100 text-green-700',
@@ -164,6 +217,29 @@ const Questions = () => {
       hard: 'bg-red-100 text-red-700'
     };
     return colors[difficulty] || colors.medium;
+  };
+
+  const addMcqOption = () => {
+    setFormData((prev) => ({
+      ...prev,
+      options: [...(prev.options || []), '']
+    }));
+  };
+
+  const removeMcqOption = (index) => {
+    setFormData((prev) => {
+      const next = [...(prev.options || [])];
+      if (next.length <= 2) return prev;
+      next.splice(index, 1);
+      let nextCorrect = prev.correctOption;
+      if (prev.correctOption === index) nextCorrect = 0;
+      else if (prev.correctOption > index) nextCorrect = prev.correctOption - 1;
+      return {
+        ...prev,
+        options: next,
+        correctOption: nextCorrect
+      };
+    });
   };
 
   if (!questions || !subjects) {
@@ -247,6 +323,7 @@ const Questions = () => {
                   <option value="">All Types</option>
                   <option value="mcq">MCQ</option>
                   <option value="theory">Theory</option>
+                  <option value="passage">Passage</option>
                 </select>
 
                 {/* Difficulty Filter */}
@@ -274,7 +351,7 @@ const Questions = () => {
             </div>
 
             {/* Stats */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
               <div className="bg-white rounded-xl shadow-sm p-4 border border-gray-200">
                 <p className="text-sm text-gray-500">Total Questions</p>
                 <p className="text-2xl font-bold text-gray-800">{filteredQuestions.length}</p>
@@ -289,6 +366,12 @@ const Questions = () => {
                 <p className="text-sm text-gray-500">Theory</p>
                 <p className="text-2xl font-bold text-purple-600">
                   {filteredQuestions.filter(q => q.type === 'theory').length}
+                </p>
+              </div>
+              <div className="bg-white rounded-xl shadow-sm p-4 border border-gray-200">
+                <p className="text-sm text-gray-500">Passage</p>
+                <p className="text-2xl font-bold text-indigo-600">
+                  {filteredQuestions.filter(q => q.type === 'passage').length}
                 </p>
               </div>
               <div className="bg-white rounded-xl shadow-sm p-4 border border-gray-200">
@@ -325,6 +408,11 @@ const Questions = () => {
                         <tr key={question._id} className="hover:bg-gray-50 transition-colors">
                           <td className="px-6 py-4">
                             <p className="text-gray-800 max-w-md truncate">{question.question}</p>
+                            {question.passageRef && (
+                              <p className="text-xs text-indigo-600 mt-1 font-medium">
+                                Passage-based question
+                              </p>
+                            )}
                             {question.topic && question.topic !== 'General' && (
                               <p className="text-xs text-gray-400 mt-1">Topic: {question.topic}</p>
                             )}
@@ -409,6 +497,7 @@ const Questions = () => {
               >
                 <option value="mcq">Multiple Choice (MCQ)</option>
                 <option value="theory">Theory</option>
+                <option value="passage">Passage</option>
               </select>
             </div>
             <div>
@@ -438,13 +527,16 @@ const Questions = () => {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Credit (Marks) *</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Credit (Marks) {formData.type === 'passage' ? '(Auto from sub-questions)' : '*'}
+              </label>
               <input
                 type="number"
                 min="1"
                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
                 value={formData.credit}
                 onChange={(e) => setFormData({ ...formData, credit: Number(e.target.value) })}
+                disabled={formData.type === 'passage'}
                 required
               />
             </div>
@@ -452,9 +544,11 @@ const Questions = () => {
 
           {/* Question */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Question *</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              {formData.type === 'passage' ? 'Passage Question Title/Instruction *' : 'Question *'}
+            </label>
             <textarea
-              placeholder="Enter your question here..."
+              placeholder={formData.type === 'passage' ? 'e.g., Read the passage and answer all sub-questions.' : 'Enter your question here...'}
               rows="3"
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none resize-none"
               value={formData.question}
@@ -490,9 +584,159 @@ const Questions = () => {
                         setFormData({ ...formData, options: newOptions });
                       }}
                     />
+                    <button
+                      type="button"
+                      onClick={() => removeMcqOption(index)}
+                      disabled={formData.options.length <= 2}
+                      className="px-3 py-2 text-sm border rounded-lg text-red-600 border-red-200 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Remove
+                    </button>
                   </div>
                 ))}
+                <button
+                  type="button"
+                  onClick={addMcqOption}
+                  className="px-3 py-2 text-sm border rounded-lg text-blue-700 border-blue-200 hover:bg-blue-50"
+                >
+                  + Add Option
+                </button>
               </div>
+            </div>
+          )}
+
+          {formData.type === 'passage' && (
+            <div className="space-y-3 border border-indigo-200 rounded-lg p-4 bg-indigo-50">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-sm font-medium text-gray-700">Passage *</label>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (passages.length === 0) await loadPassages();
+                        setShowPassageModal(true);
+                      }}
+                      className="text-sm text-indigo-600 hover:text-indigo-800"
+                    >
+                      + Create Passage
+                    </button>
+                  </div>
+                  <select
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg outline-none"
+                    value={formData.passageRef}
+                    onChange={(e) => setFormData({ ...formData, passageRef: e.target.value })}
+                    required
+                  >
+                    <option value="">Select Passage</option>
+                    {passages.map((p) => (
+                      <option key={p._id} value={p._id}>{p.title}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex items-end">
+                  <button
+                    type="button"
+                    className="px-3 py-2 border rounded-lg text-indigo-700"
+                    onClick={() =>
+                      setFormData({
+                        ...formData,
+                        subQuestions: [...formData.subQuestions, { prompt: '', type: 'mcq', options: ['', '', '', ''], correctOption: 0, credit: 1 }]
+                      })
+                    }
+                  >
+                    + Add Sub Question
+                  </button>
+                </div>
+              </div>
+
+              {formData.subQuestions.map((sq, i) => (
+                <div key={i} className="border rounded-lg p-3 bg-white">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2">
+                    <input
+                      type="text"
+                      className="md:col-span-2 px-3 py-2 border rounded"
+                      placeholder={`Sub Question ${i + 1}`}
+                      value={sq.prompt}
+                      onChange={(e) => {
+                        const arr = [...formData.subQuestions];
+                        arr[i].prompt = e.target.value;
+                        setFormData({ ...formData, subQuestions: arr });
+                      }}
+                    />
+                    <select
+                      className="px-3 py-2 border rounded"
+                      value={sq.type}
+                      onChange={(e) => {
+                        const arr = [...formData.subQuestions];
+                        arr[i].type = e.target.value;
+                        if (e.target.value === 'theory') {
+                          arr[i].options = [];
+                          arr[i].correctOption = undefined;
+                        } else if (!arr[i].options || arr[i].options.length < 2) {
+                          arr[i].options = ['', '', '', ''];
+                          arr[i].correctOption = 0;
+                        }
+                        setFormData({ ...formData, subQuestions: arr });
+                      }}
+                    >
+                      <option value="mcq">MCQ</option>
+                      <option value="theory">Theory</option>
+                    </select>
+                  </div>
+                  <div className="flex gap-2 items-center mb-2">
+                    <input
+                      type="number"
+                      min="1"
+                      className="w-28 px-3 py-2 border rounded"
+                      value={sq.credit}
+                      onChange={(e) => {
+                        const arr = [...formData.subQuestions];
+                        arr[i].credit = Number(e.target.value || 1);
+                        setFormData({ ...formData, subQuestions: arr });
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="text-red-600 text-sm"
+                      onClick={() => {
+                        const arr = formData.subQuestions.filter((_, idx) => idx !== i);
+                        setFormData({ ...formData, subQuestions: arr });
+                      }}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                  {sq.type === 'mcq' && (
+                    <div className="space-y-2">
+                      {(sq.options || []).map((opt, idx) => (
+                        <div key={idx} className="flex items-center gap-2">
+                          <input
+                            type="radio"
+                            checked={sq.correctOption === idx}
+                            onChange={() => {
+                              const arr = [...formData.subQuestions];
+                              arr[i].correctOption = idx;
+                              setFormData({ ...formData, subQuestions: arr });
+                            }}
+                          />
+                          <input
+                            type="text"
+                            className="flex-1 px-3 py-2 border rounded"
+                            placeholder={`Option ${idx + 1}`}
+                            value={opt}
+                            onChange={(e) => {
+                              const arr = [...formData.subQuestions];
+                              arr[i].options[idx] = e.target.value;
+                              setFormData({ ...formData, subQuestions: arr });
+                            }}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
           )}
 
@@ -540,10 +784,47 @@ const Questions = () => {
           type="questions"
           subjects={subjects}
           onSuccess={() => {
-            setShowBulkModal(false);
-            refreshQuestions();
+            Promise.all([refreshQuestions(), refreshSubjects()]);
           }}
         />
+      </Modal>
+
+      <Modal
+        isOpen={showPassageModal}
+        onClose={() => setShowPassageModal(false)}
+        title="Create Passage"
+      >
+        <form
+          className="space-y-3"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            try {
+              const res = await passageService.createPassage(passageForm);
+              setPassages((prev) => [res.passage, ...prev]);
+              setFormData((prev) => ({ ...prev, passageRef: res.passage._id }));
+              setPassageForm({ title: '', text: '', topic: '', complexity: 'simple', marksLabel: '' });
+              setShowPassageModal(false);
+            } catch (err) {
+              alert(err.response?.data?.message || 'Failed to create passage');
+            }
+          }}
+        >
+          <input className="w-full px-3 py-2 border rounded-lg" placeholder="Title" value={passageForm.title} onChange={(e) => setPassageForm({ ...passageForm, title: e.target.value })} required />
+          <input className="w-full px-3 py-2 border rounded-lg" placeholder="Topic" value={passageForm.topic} onChange={(e) => setPassageForm({ ...passageForm, topic: e.target.value })} />
+          <div className="grid grid-cols-2 gap-3">
+            <select className="w-full px-3 py-2 border rounded-lg" value={passageForm.complexity} onChange={(e) => setPassageForm({ ...passageForm, complexity: e.target.value })}>
+              <option value="simple">Simple</option>
+              <option value="moderate">Moderate</option>
+              <option value="complex">Complex</option>
+            </select>
+            <input className="w-full px-3 py-2 border rounded-lg" placeholder="Marks label" value={passageForm.marksLabel} onChange={(e) => setPassageForm({ ...passageForm, marksLabel: e.target.value })} />
+          </div>
+          <textarea className="w-full px-3 py-2 border rounded-lg" rows="7" placeholder="Passage text" value={passageForm.text} onChange={(e) => setPassageForm({ ...passageForm, text: e.target.value })} required />
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={() => setShowPassageModal(false)} className="px-4 py-2 border rounded-lg">Cancel</button>
+            <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg">Save Passage</button>
+          </div>
+        </form>
       </Modal>
     </div>
   );

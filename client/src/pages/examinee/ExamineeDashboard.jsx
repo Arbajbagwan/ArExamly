@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import Navbar from '../../components/common/Navbar';
 import Sidebar from '../../components/common/Sidebar';
 import Loader from '../../components/common/Loader';
@@ -28,31 +29,35 @@ const ExamineeDashboard = () => {
     if (exam.questions && exam.questions.length > 0) {
       let mcq = 0;
       let theory = 0;
+      let passage = 0;
 
       exam.questions.forEach(q => {
         const type = q.question?.type || q.type;
         if (type === 'mcq') mcq++;
         if (type === 'theory') theory++;
+        if (type === 'passage') passage++;
       });
 
-      return { mcq, theory };
+      return { mcq, theory, passage };
     }
 
     // Split mode
     if (
       exam.randomConfig &&
-      ((exam.randomConfig.mcqCount || 0) + (exam.randomConfig.theoryCount || 0)) > 0
+      ((exam.randomConfig.mcqCount || 0) + (exam.randomConfig.theoryCount || 0) + (exam.randomConfig.passageCount || 0)) > 0
     ) {
       return {
         mcq: exam.randomConfig.mcqCount || 0,
-        theory: exam.randomConfig.theoryCount || 0
+        theory: exam.randomConfig.theoryCount || 0,
+        passage: exam.randomConfig.passageCount || 0
       };
     }
 
     // Any mode
     return {
       mcq: exam.randomConfig?.totalQuestions || 0,
-      theory: 0
+      theory: 0,
+      passage: 0
     };
   };
 
@@ -67,9 +72,11 @@ const ExamineeDashboard = () => {
   };
 
   const getExamAction = (exam) => {
-    if (exam.status !== 'active') return null;
+    if (exam.myAttemptStatus === 'evaluated') {
+      return { type: 'evaluated' };
+    }
 
-    if (exam.myAttemptStatus === 'submitted') {
+    if (exam.myAttemptStatus === 'submitted' || exam.myAttemptStatus === 'auto-submitted') {
       return { type: 'submitted' };
     }
 
@@ -81,7 +88,7 @@ const ExamineeDashboard = () => {
       };
     }
 
-    if (!exam.myAttemptStatus) {
+    if (exam.status === 'active' && !exam.myAttemptStatus) {
       return {
         type: 'link',
         label: 'Take Exam',
@@ -110,7 +117,7 @@ const ExamineeDashboard = () => {
                 </p>
               ) : (
                 exams.map((exam) => {
-                  const { mcq, theory } = getQuestionCounts(exam);
+                  const { mcq, theory, passage } = getQuestionCounts(exam);
 
                   return (
                     <div
@@ -137,7 +144,7 @@ const ExamineeDashboard = () => {
                         <div className="flex justify-between">
                           <span className="text-sm text-gray-500">Questions:</span>
                           <span className="text-sm font-medium">
-                            {mcq} MCQ{theory > 0 && `, ${theory} Theory`}
+                            {mcq} MCQ{theory > 0 && `, ${theory} Theory`}{passage > 0 && `, ${passage} Passage`}
                           </span>
                         </div>
 
@@ -165,7 +172,6 @@ const ExamineeDashboard = () => {
                         const action = getExamAction(exam);
                         if (!action) return null;
 
-                        // ✅ SUBMITTED badge (same position as button)
                         if (action.type === 'submitted') {
                           return (
                             <div className="w-full text-center py-2 rounded-lg bg-yellow-100 text-yellow-700 font-medium text-sm">
@@ -174,14 +180,24 @@ const ExamineeDashboard = () => {
                           );
                         }
 
-                        // ✅ Normal button
+                        if (action.type === 'evaluated') {
+                          return (
+                            <Link
+                              to="/examinee/results"
+                              className="block w-full text-center py-2 rounded-lg bg-green-100 text-green-700 font-medium text-sm hover:bg-green-200 transition"
+                            >
+                              VIEW RESULT
+                            </Link>
+                          );
+                        }
+
                         return (
-                          <a
-                            href={action.href}
+                          <Link
+                            to={action.href}
                             className="block w-full text-center bg-blue-500 text-white py-2 rounded-lg hover:bg-blue-600 transition"
                           >
                             {action.label}
-                          </a>
+                          </Link>
                         );
                       })()}
 

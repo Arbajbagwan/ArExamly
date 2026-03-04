@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const questionSchema = new mongoose.Schema({
   type: {
     type: String,
-    enum: ['mcq', 'theory'],
+    enum: ['mcq', 'theory', 'passage'],
     required: true
   },
   question: {
@@ -47,6 +47,40 @@ const questionSchema = new mongoose.Schema({
   explanation: {
     type: String
   },
+  subQuestions: [{
+    prompt: { type: String, required: true, trim: true },
+    type: { type: String, enum: ['mcq', 'theory'], required: true },
+    options: [{ type: String }],
+    correctOption: { type: Number },
+    credit: { type: Number, required: true, min: 0 }
+  }],
+  passage: {
+    title: {
+      type: String,
+      trim: true
+    },
+    text: {
+      type: String,
+      trim: true
+    },
+    topic: {
+      type: String,
+      trim: true
+    },
+    complexity: {
+      type: String,
+      enum: ['simple', 'moderate', 'complex'],
+      default: 'simple'
+    },
+    marksLabel: {
+      type: String,
+      trim: true
+    }
+  },
+  passageRef: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Passage'
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
@@ -70,6 +104,35 @@ questionSchema.pre('save', async function() {
       throw new Error('Invalid correct option index');
     }
   }
+
+  if (this.type === 'passage') {
+    if (!this.passageRef) {
+      throw new Error('Passage type question must be linked to a passage');
+    }
+    if (!Array.isArray(this.subQuestions) || this.subQuestions.length === 0) {
+      throw new Error('Passage type question must have sub questions');
+    }
+    for (const sq of this.subQuestions) {
+      if (sq.type === 'mcq') {
+        if (!sq.options || sq.options.length < 2) {
+          throw new Error('Passage MCQ must have at least 2 options');
+        }
+        if (sq.correctOption === undefined || sq.correctOption >= sq.options.length) {
+          throw new Error('Invalid passage MCQ correct option index');
+        }
+      }
+    }
+    this.credit = this.subQuestions.reduce((sum, sq) => sum + (sq.credit || 0), 0);
+  }
+});
+
+// Hot-path index for random question selection in startExam.
+questionSchema.index({
+  createdBy: 1,
+  isActive: 1,
+  type: 1,
+  subject: 1,
+  difficulty: 1
 });
 
 module.exports = mongoose.model('Question', questionSchema);

@@ -1,34 +1,34 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 
 const Timer = ({ duration, onTimeUp, startTime }) => {
-  const [timeLeft, setTimeLeft] = useState(duration * 60); // Convert to seconds
-
-  useEffect(() => {
-    // Calculate actual time left based on start time
+  const getRemainingTime = useCallback(() => {
     const elapsed = Math.floor((Date.now() - new Date(startTime)) / 1000);
     const remaining = (duration * 60) - elapsed;
-    setTimeLeft(remaining > 0 ? remaining : 0);
+    return remaining > 0 ? remaining : 0;
   }, [duration, startTime]);
 
-  useEffect(() => {
-    if (timeLeft <= 0) {
-      onTimeUp();
-      return;
-    }
+  const [timeLeft, setTimeLeft] = useState(getRemainingTime);
 
+  useEffect(() => {
     const timer = setInterval(() => {
-      setTimeLeft(prev => {
-        if (prev <= 1) {
+      setTimeLeft(() => {
+        const remaining = getRemainingTime();
+        if (remaining <= 0) {
           clearInterval(timer);
           onTimeUp();
           return 0;
         }
-        return prev - 1;
+        return remaining;
       });
     }, 1000);
 
+    if (getRemainingTime() <= 0) {
+      clearInterval(timer);
+      onTimeUp();
+    }
+
     return () => clearInterval(timer);
-  }, [timeLeft, onTimeUp]);
+  }, [getRemainingTime, onTimeUp]);
 
   const hours = Math.floor(timeLeft / 3600);
   const minutes = Math.floor((timeLeft % 3600) / 60);

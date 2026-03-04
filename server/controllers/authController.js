@@ -122,7 +122,7 @@ exports.login = async (req, res, next) => {
       sameSite: 'none'
     };
 
-    res.status(200)
+    return res.status(200)
       .cookie('jwt', token, options)
       .json({
         success: true,
@@ -136,10 +136,6 @@ exports.login = async (req, res, next) => {
         },
         sessionToken // Frontend stores this in localStorage
       });
-
-    // Set CORS headers explicitly
-    res.setHeader('Access-Control-Allow-Origin', process.env.FRONTEND_URL || 'http://localhost:5173');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
   } catch (error) {
     next(error);
   }

@@ -1,5 +1,17 @@
 import API from './api';
 
+const toPayload = (examData) => {
+  if (examData instanceof FormData) return examData;
+  return examData;
+};
+
+const getRequestConfig = (examData) => {
+  if (examData instanceof FormData) {
+    return { headers: { 'Content-Type': 'multipart/form-data' } };
+  }
+  return undefined;
+};
+
 export const examService = {
   getExams: async () => {
     const { data } = await API.get('/exams');
@@ -12,12 +24,12 @@ export const examService = {
   },
 
   createExam: async (examData) => {
-    const { data } = await API.post('/exams', examData);
+    const { data } = await API.post('/exams', toPayload(examData), getRequestConfig(examData));
     return data;
   },
 
   updateExam: async (id, examData) => {
-    const { data } = await API.put(`/exams/${id}`, examData);
+    const { data } = await API.put(`/exams/${id}`, toPayload(examData), getRequestConfig(examData));
     return data;
   },
 

@@ -1,7 +1,15 @@
 const Question = require('../models/Question');
 const Subject = require('../models/Subject');
+const Passage = require('../models/Passage');
 const { parseQuestionsExcel } = require('../utils/excelParser');
 const fs = require('fs').promises;
+
+const applyQuestionOwnerFilter = (req, filter = {}) => {
+  if (req.user.role === 'superuser') {
+    return { ...filter, createdBy: req.user._id };
+  }
+  return filter;
+};
 
 // @desc    Get all questions
 // @route   GET /api/questions
@@ -10,7 +18,7 @@ exports.getQuestions = async (req, res, next) => {
   try {
     const { type, subject, difficulty, topic, search } = req.query;
 
-    let filter = { isActive: true };
+    let filter = applyQuestionOwnerFilter(req, { isActive: true });
 
     // Apply filters
     if (type) filter.type = type;
@@ -20,12 +28,16 @@ exports.getQuestions = async (req, res, next) => {
     if (search) {
       filter.$or = [
         { question: { $regex: search, $options: 'i' } },
+        { 'passage.title': { $regex: search, $options: 'i' } },
+        { 'passage.text': { $regex: search, $options: 'i' } },
+        { 'passage.topic': { $regex: search, $options: 'i' } },
         { tags: { $in: [new RegExp(search, 'i')] } }
       ];
     }
 
     const questions = await Question.find(filter)
       .populate('subject', 'name code color')
+      .populate('passageRef', 'title topic complexity marksLabel')
       .populate('createdBy', 'firstname lastname username')
       .sort('-createdAt');
 
@@ -44,8 +56,11 @@ exports.getQuestions = async (req, res, next) => {
 // @access  Private (SuperUser)
 exports.getQuestion = async (req, res, next) => {
   try {
-    const question = await Question.findById(req.params.id)
+    const question = await Question.findOne(
+      applyQuestionOwnerFilter(req, { _id: req.params.id })
+    )
       .populate('subject', 'name code color')
+      .populate('passageRef', 'title text topic complexity marksLabel')
       .populate('createdBy', 'firstname lastname username');
 
     if (!question) {
@@ -69,7 +84,20 @@ exports.getQuestion = async (req, res, next) => {
 // @access  Private (SuperUser)
 exports.createQuestion = async (req, res, next) => {
   try {
-    const { type, question, options, correctOption, credit, subject, topic, difficulty, tags, explanation } = req.body;
+    const {
+      type,
+      question,
+      options,
+      correctOption,
+      credit,
+      subject,
+      topic,
+      difficulty,
+      tags,
+      explanation,
+      passage,
+      subQuestions
+    } = req.body;
 
     // Validate subject exists
     const subjectExists = await Subject.findById(subject);
@@ -92,16 +120,55 @@ exports.createQuestion = async (req, res, next) => {
       createdBy: req.user._id
     };
 
+    if (passage?.text?.trim()) {
+      questionData.passage = {
+        title: passage.title?.trim() || '',
+        text: passage.text.trim(),
+        topic: passage.topic?.trim() || '',
+        complexity: passage.complexity || 'simple',
+        marksLabel: passage.marksLabel?.trim() || ''
+      };
+    }
+    if (req.body.passageRef) {
+      const passageDoc = await Passage.findOne({
+        _id: req.body.passageRef,
+        ...(req.user.role === 'superuser' ? { createdBy: req.user._id } : {}),
+        isActive: true
+      });
+      if (!passageDoc) {
+        return res.status(400).json({ success: false, message: 'Invalid passage selected' });
+      }
+      questionData.passageRef = req.body.passageRef;
+      delete questionData.passage;
+    }
+
     // Add MCQ specific fields
     if (type === 'mcq') {
       questionData.options = options;
       questionData.correctOption = Number(correctOption);
+    }
+    if (type === 'passage') {
+      if (!Array.isArray(subQuestions) || subQuestions.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Passage question must include sub questions'
+        });
+      }
+      questionData.subQuestions = subQuestions.map((sq) => ({
+        prompt: sq.prompt,
+        type: sq.type,
+        options: sq.type === 'mcq' ? (sq.options || []) : [],
+        correctOption: sq.type === 'mcq' ? Number(sq.correctOption) : undefined,
+        credit: Number(sq.credit || 0)
+      }));
+      questionData.credit = questionData.subQuestions.reduce((sum, sq) => sum + (sq.credit || 0), 0);
     }
 
     const newQuestion = await Question.create(questionData);
 
     // Populate subject for response
     await newQuestion.populate('subject', 'name code color');
+    await newQuestion.populate('passageRef', 'title topic complexity marksLabel');
 
     res.status(201).json({
       success: true,
@@ -118,7 +185,9 @@ exports.createQuestion = async (req, res, next) => {
 // @access  Private (SuperUser)
 exports.updateQuestion = async (req, res, next) => {
   try {
-    let question = await Question.findById(req.params.id);
+    let question = await Question.findOne(
+      applyQuestionOwnerFilter(req, { _id: req.params.id })
+    );
 
     if (!question) {
       return res.status(404).json({
@@ -146,11 +215,58 @@ exports.updateQuestion = async (req, res, next) => {
       }
     }
 
-    question = await Question.findByIdAndUpdate(
-      req.params.id,
-      req.body,
+    const updateData = { ...req.body };
+
+    if (req.body.passage) {
+      if (req.body.passage.text?.trim()) {
+        updateData.passage = {
+          title: req.body.passage.title?.trim() || '',
+          text: req.body.passage.text.trim(),
+          topic: req.body.passage.topic?.trim() || '',
+          complexity: req.body.passage.complexity || 'simple',
+          marksLabel: req.body.passage.marksLabel?.trim() || ''
+        };
+      } else {
+        updateData.passage = undefined;
+      }
+    }
+    if (req.body.passageRef !== undefined) {
+      if (req.body.passageRef) {
+        const passageDoc = await Passage.findOne({
+          _id: req.body.passageRef,
+          ...(req.user.role === 'superuser' ? { createdBy: req.user._id } : {}),
+          isActive: true
+        });
+        if (!passageDoc) {
+          return res.status(400).json({ success: false, message: 'Invalid passage selected' });
+        }
+      }
+      updateData.passageRef = req.body.passageRef || null;
+      if (updateData.passageRef) delete updateData.passage;
+    }
+    if (req.body.type === 'passage' || req.body.subQuestions) {
+      if (!Array.isArray(req.body.subQuestions) || req.body.subQuestions.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Passage question must include sub questions'
+        });
+      }
+      updateData.subQuestions = req.body.subQuestions.map((sq) => ({
+        prompt: sq.prompt,
+        type: sq.type,
+        options: sq.type === 'mcq' ? (sq.options || []) : [],
+        correctOption: sq.type === 'mcq' ? Number(sq.correctOption) : undefined,
+        credit: Number(sq.credit || 0)
+      }));
+      updateData.credit = updateData.subQuestions.reduce((sum, sq) => sum + (sq.credit || 0), 0);
+    }
+
+    question = await Question.findOneAndUpdate(
+      applyQuestionOwnerFilter(req, { _id: req.params.id }),
+      updateData,
       { new: true, runValidators: true }
-    ).populate('subject', 'name code color');
+    ).populate('subject', 'name code color')
+      .populate('passageRef', 'title topic complexity marksLabel');
 
     res.status(200).json({
       success: true,
@@ -167,7 +283,9 @@ exports.updateQuestion = async (req, res, next) => {
 // @access  Private (SuperUser)
 exports.deleteQuestion = async (req, res, next) => {
   try {
-    const question = await Question.findById(req.params.id);
+    const question = await Question.findOne(
+      applyQuestionOwnerFilter(req, { _id: req.params.id })
+    );
 
     if (!question) {
       return res.status(404).json({
@@ -212,7 +330,10 @@ exports.bulkCreateQuestions = async (req, res, next) => {
     }
 
     // Verify subject exists
-    const subject = await Subject.findById(subjectId);
+    const subject = await Subject.findOne({
+      _id: subjectId,
+      ...(req.user.role === 'superuser' ? { createdBy: req.user._id } : {})
+    });
     if (!subject) {
       await fs.unlink(req.file.path);
       return res.status(400).json({
@@ -276,7 +397,9 @@ exports.bulkCreateQuestions = async (req, res, next) => {
 exports.getQuestionStats = async (req, res, next) => {
   try {
     const stats = await Question.aggregate([
-      { $match: { isActive: true } },
+      {
+        $match: applyQuestionOwnerFilter(req, { isActive: true })
+      },
       {
         $group: {
           _id: '$subject',

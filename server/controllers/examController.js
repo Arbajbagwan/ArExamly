@@ -3,6 +3,27 @@ const Question = require('../models/Question');
 const User = require('../models/User');
 const syncExamStatus = require('../utils/syncExamStatus');
 const ExamAttempt = require('../models/ExamAttempt');
+const { delCache } = require('../utils/cache');
+const path = require('path');
+const fs = require('fs').promises;
+
+const toBool = (val, fallback = false) => {
+  if (val === undefined || val === null || val === '') return fallback;
+  if (typeof val === 'boolean') return val;
+  return String(val).toLowerCase() === 'true';
+};
+
+const parseCustomInstructions = (raw) => {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.map((x) => String(x).trim()).filter(Boolean);
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.map((x) => String(x).trim()).filter(Boolean);
+  } catch (_) {
+    // no-op, fallback to newline split
+  }
+  return String(raw).split('\n').map((x) => x.trim()).filter(Boolean);
+};
 
 // @desc    Get all exams
 // @route   GET /api/exams
@@ -32,6 +53,35 @@ exports.getExams = async (req, res, next) => {
       .sort('-createdAt');
 
     const result = [];
+    const examIdStrings = exams.map((e) => String(e._id));
+    const completionRows = examIdStrings.length
+      ? await ExamAttempt.aggregate([
+        {
+          $match: {
+            status: { $in: ['submitted', 'evaluated', 'auto-submitted'] }
+          }
+        },
+        {
+          $addFields: {
+            examKey: { $toString: '$exam' }
+          }
+        },
+        {
+          $match: {
+            examKey: { $in: examIdStrings }
+          }
+        },
+        {
+          $group: {
+            _id: '$examKey',
+            completedUsersCount: { $sum: 1 }
+          }
+        }
+      ])
+      : [];
+    const completionMap = new Map(
+      completionRows.map((r) => [String(r._id), Number(r.completedUsersCount || 0)])
+    );
 
     for (const exam of exams) {
       await syncExamStatus(exam);
@@ -47,7 +97,8 @@ exports.getExams = async (req, res, next) => {
 
       result.push({
         ...exam.toObject(),
-        myAttemptStatus: attempt?.status || null
+        myAttemptStatus: attempt?.status || null,
+        completedUsersCount: completionMap.get(String(exam._id)) || 0
       });
     }
 
@@ -128,7 +179,13 @@ exports.createExam = async (req, res, next) => {
       startTime,
       endTime,
       instructions,
-      passingMarks
+      customInstructions,
+      instructionLink,
+      passingMarks,
+      shuffleQuestions,
+      shuffleOptions,
+      allowReview,
+      showResults
     } = req.body;
 
     // Validate required fields
@@ -148,10 +205,20 @@ exports.createExam = async (req, res, next) => {
       startTime,
       endTime,
       instructions,
+      customInstructions: parseCustomInstructions(customInstructions),
+      instructionLink: instructionLink || '',
       passingMarks: passingMarks || 0,
+      shuffleQuestions: toBool(shuffleQuestions, false),
+      shuffleOptions: toBool(shuffleOptions, false),
+      allowReview: toBool(allowReview, true),
+      showResults: toBool(showResults, false),
       createdBy: req.user._id,
       status: 'draft'
     };
+
+    if (req.file) {
+      examData.instructionPdf = `/uploads/${path.basename(req.file.path)}`;
+    }
 
     const exam = await Exam.create(examData);
 
@@ -209,6 +276,37 @@ exports.updateExam = async (req, res, next) => {
       updateData.scheduledDate = new Date(updateData.scheduledDate);
     }
 
+    if (updateData.shuffleQuestions !== undefined) {
+      updateData.shuffleQuestions = toBool(updateData.shuffleQuestions, false);
+    }
+    if (updateData.shuffleOptions !== undefined) {
+      updateData.shuffleOptions = toBool(updateData.shuffleOptions, false);
+    }
+    if (updateData.allowReview !== undefined) {
+      updateData.allowReview = toBool(updateData.allowReview, true);
+    }
+    if (updateData.showResults !== undefined) {
+      updateData.showResults = toBool(updateData.showResults, false);
+    }
+    if (updateData.customInstructions !== undefined) {
+      updateData.customInstructions = parseCustomInstructions(updateData.customInstructions);
+    }
+    const removeInstructionPdf = toBool(updateData.removeInstructionPdf, false);
+    delete updateData.removeInstructionPdf;
+
+    if (req.file) {
+      // Replace existing PDF with newly uploaded file
+      if (exam.instructionPdf) {
+        const oldPath = path.join(__dirname, '..', exam.instructionPdf.replace(/^\//, ''));
+        await fs.unlink(oldPath).catch(() => {});
+      }
+      updateData.instructionPdf = `/uploads/${path.basename(req.file.path)}`;
+    } else if (removeInstructionPdf && exam.instructionPdf) {
+      const oldPath = path.join(__dirname, '..', exam.instructionPdf.replace(/^\//, ''));
+      await fs.unlink(oldPath).catch(() => {});
+      updateData.instructionPdf = '';
+    }
+
     exam = await Exam.findByIdAndUpdate(
       req.params.id,
       updateData,
@@ -225,15 +323,8 @@ exports.updateExam = async (req, res, next) => {
     }
 
     // --- INVALIDATE REDIS CACHE ---
-    if (global.redis && global.redis.status === 'ready') {
-      const cacheKey = `exam:${req.params.id}:data`;
-      try {
-        await global.redis.del(cacheKey);
-        console.log('Cache invalidated for:', cacheKey);
-      } catch (err) {
-        console.error('Redis delete failed, skipping...');
-      }
-    }
+    const cacheKey = `exam:${req.params.id}:data`;
+    await delCache(cacheKey);
 
     res.status(200).json({
       success: true,
@@ -374,6 +465,7 @@ exports.generateRandomQuestions = async (req, res, next) => {
       totalQuestions,
       mcqCount = 0,
       theoryCount = 0,
+      passageCount = 0,
       subjectIds = [],
       difficulty,
       topic,
@@ -388,6 +480,7 @@ exports.generateRandomQuestions = async (req, res, next) => {
       totalQuestions: Number(totalQuestions),
       mcqCount: Number(mcqCount),
       theoryCount: Number(theoryCount),
+      passageCount: Number(passageCount),
       subjectIds,
       difficulty,
       topic,
@@ -402,9 +495,7 @@ exports.generateRandomQuestions = async (req, res, next) => {
     await exam.save();
 
     // 4. Invalidate Cache
-    if (global.redis && global.redis.status === 'ready') {
-      await global.redis.del(`exam:${examId}:data`);
-    }
+    await delCache(`exam:${examId}:data`);
 
     return res.status(200).json({
       success: true,

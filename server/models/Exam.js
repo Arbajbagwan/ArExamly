@@ -26,6 +26,18 @@ const examSchema = new mongoose.Schema({
   instructions: {
     type: String
   },
+  customInstructions: [{
+    type: String,
+    trim: true
+  }],
+  instructionLink: {
+    type: String,
+    trim: true
+  },
+  instructionPdf: {
+    type: String,
+    trim: true
+  },
   scheduledDate: {
     type: Date,
     required: [true, 'Please provide scheduled date']
@@ -62,6 +74,7 @@ const examSchema = new mongoose.Schema({
     totalQuestions: { type: Number, min: 1 },
     mcqCount: { type: Number, min: 0 },
     theoryCount: { type: Number, min: 0 },
+    passageCount: { type: Number, min: 0 },
 
     subjectIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Subject' }],
     difficulty: { type: String, enum: ['easy', 'medium', 'hard'] },
@@ -145,5 +158,9 @@ examSchema.methods.isExamActive = function () {
 // Include virtuals in JSON
 examSchema.set('toJSON', { virtuals: true });
 examSchema.set('toObject', { virtuals: true });
+
+// Hot-path indexes used during startExam assignment/time checks and dashboard listing.
+examSchema.index({ assignedTo: 1, scheduledDate: 1, status: 1 });
+examSchema.index({ createdBy: 1, scheduledDate: -1 });
 
 module.exports = mongoose.model('Exam', examSchema);

@@ -88,7 +88,7 @@ const Login = () => {
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg transition-colors disabled:bg-blue-400 disabled:cursor-not-allowed flex items-center justify-center space-x-2"
+              className="btn btn-neutral w-full flex items-center justify-center space-x-2"
             >
               {loading ? (
                 <>

@@ -36,6 +36,23 @@ const MyResults = () => {
     const submittedAt = new Date(attempt.submittedAt).toLocaleString();
 
     let y = 20;
+    const PAGE_HEIGHT = 297;
+    const BOTTOM_MARGIN = 20;
+    const MAX_Y = PAGE_HEIGHT - BOTTOM_MARGIN;
+
+    const ensureSpace = (needed = 10) => {
+      if (y + needed > MAX_Y) {
+        doc.addPage();
+        y = 20;
+      }
+    };
+
+    const writeWrapped = (text, x, maxWidth = 170, lineH = 6) => {
+      const lines = doc.splitTextToSize(String(text ?? '-'), maxWidth);
+      ensureSpace(lines.length * lineH + 2);
+      doc.text(lines, x, y);
+      y += lines.length * lineH;
+    };
 
     // ===== HEADER =====
     doc.setFontSize(11);
@@ -68,57 +85,65 @@ const MyResults = () => {
       const q = ans.question;
 
       doc.setFontSize(12);
-      doc.text(
-        `Q${index + 1}. ${q.question}`,
-        14,
-        y,
-        { maxWidth: 180 }
-      );
-      y += 8;
+      writeWrapped(`Q${index + 1}. ${q.question}`, 14, 180, 6);
+      y += 2;
 
       doc.setFontSize(11);
 
       // ===== MCQ =====
       if (q.type === 'mcq') {
         q.options.forEach((opt, i) => {
+          ensureSpace(7);
           const isSelected = ans.selectedOption === i;
           const marker = isSelected ? 'Selected' : '   ';
-
-          doc.text(
-            `${String.fromCharCode(65 + i)}. ${opt} ${marker}`,
-            18,
-            y
-          );
-          y += 6;
+          writeWrapped(`${String.fromCharCode(65 + i)}. ${opt} ${marker}`, 18, 168, 6);
         });
       }
 
       // ===== THEORY =====
       if (q.type === 'theory') {
-        doc.text(
-          `Answer: ${ans.textAnswer || '-'}`,
-          18,
-          y,
-          { maxWidth: 170 }
-        );
-        y += 8;
+        writeWrapped(`Answer: ${ans.textAnswer || '-'}`, 18, 170, 6);
+        y += 2;
+      }
+
+      // ===== PASSAGE =====
+      if (q.type === 'passage') {
+        const passage = q.passageRef || q.passage;
+        if (passage?.title) {
+          writeWrapped(`Passage: ${passage.title}`, 18, 170, 6);
+        }
+        if (passage?.text) {
+          writeWrapped(passage.text, 18, 170, 6);
+          y += 2;
+        }
+        if (passage?.marksLabel) {
+          writeWrapped(`Passage Marks: ${passage.marksLabel}`, 18, 170, 6);
+        }
+        (q.subQuestions || []).forEach((sq, sqIndex) => {
+          const resp = (ans.passageResponses || []).find(
+            (r) => String(r.subQuestionId) === String(sq._id)
+          );
+          writeWrapped(`${sqIndex + 1}. ${sq.prompt}`, 18, 170, 6);
+          if (sq.type === 'mcq') {
+            const picked = typeof resp?.selectedOption === 'number'
+              ? String.fromCharCode(65 + resp.selectedOption)
+              : '-';
+            writeWrapped(`Selected: ${picked}`, 20, 165, 6);
+          } else {
+            writeWrapped(`Answer: ${resp?.textAnswer || '-'}`, 20, 165, 6);
+          }
+          writeWrapped(`Sub Marks: ${resp?.marksObtained || 0}/${sq.credit}`, 20, 165, 6);
+          y += 1;
+        });
       }
 
       // ===== MARKS + RESULT =====
-      doc.text(
-        `Marks: ${ans.marksObtained} / ${q.credit}   |   ${ans.isCorrect ? 'Correct' : 'Incorrect'
-        }`,
-        18,
-        y
-      );
+      const correctness = q.type === 'mcq'
+        ? (ans.isCorrect ? 'Correct' : 'Incorrect')
+        : 'Evaluated';
+      writeWrapped(`Marks: ${ans.marksObtained} / ${q.credit}   |   ${correctness}`, 18, 168, 6);
 
       y += 10;
-
-      // Page break
-      if (y > 270) {
-        doc.addPage();
-        y = 20;
-      }
     });
 
     const safeExam = examTitle.replace(/[^a-zA-Z0-9]/g, '_');
@@ -217,6 +242,20 @@ const MyResults = () => {
                             >
                               <p className="font-medium">Question {index + 1}</p>
                               <p className="text-gray-600">Marks: {answer.marksObtained}/{answer.question.credit}</p>
+                              {answer.question.type === 'passage' && (
+                                <div className="mt-2 space-y-1">
+                                  {(answer.question.subQuestions || []).map((sq, sqIndex) => {
+                                    const resp = (answer.passageResponses || []).find(
+                                      (r) => String(r.subQuestionId) === String(sq._id)
+                                    );
+                                    return (
+                                      <p key={sq._id || sqIndex} className="text-gray-600">
+                                        {sqIndex + 1}. {sq.type.toUpperCase()} - {resp?.marksObtained || 0}/{sq.credit}
+                                      </p>
+                                    );
+                                  })}
+                                </div>
+                              )}
                               {answer.feedback && (
                                 <p className="mt-1 text-gray-700">{answer.feedback}</p>
                               )}

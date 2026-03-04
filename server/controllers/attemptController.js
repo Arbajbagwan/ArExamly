@@ -2,6 +2,7 @@ const ExamAttempt = require('../models/ExamAttempt');
 const Exam = require('../models/Exam');
 const Question = require('../models/Question');
 const PDFDocument = require('pdfkit');
+const { getCache, setCache } = require('../utils/cache');
 
 const combineDateTime = (date, timeString) => {
   const [hours, minutes] = timeString.split(':');
@@ -19,41 +20,37 @@ const shuffleIndices = (n) => {
   return arr; // displayedIndex -> originalIndex
 };
 
+const shuffleArray = (arr) => {
+  const out = [...arr];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+};
+
 exports.startExam = async (req, res, next) => {
   try {
     const examId = req.params.examId;
+    const userId = req.user._id.toString();
     const cacheKey = `exam:${examId}:data`;
     let exam;
 
     // Cache exam meta only (safe)
-    if (global.redis) {
-      try {
-        const cached = await global.redis.get(cacheKey);
-        if (cached) exam = JSON.parse(cached);
-      } catch (e) {
-        console.warn('Redis read failed:', e.message);
-      }
-    }
+    exam = await getCache(cacheKey);
 
     if (!exam) {
-      // IMPORTANT: we still populate questions.question because we may use it as POOL
       exam = await Exam.findById(examId)
-        .populate('questions.question')
+        .select('title description duration scheduledDate startTime endTime shuffleQuestions shuffleOptions selectionMode randomConfig status createdBy assignedTo questions.question')
         .lean();
 
       if (!exam) return res.status(404).json({ success: false, message: 'Exam not found' });
 
-      if (global.redis) {
-        try {
-          await global.redis.setex(cacheKey, 600, JSON.stringify(exam));
-        } catch (e) {
-          console.warn('Redis write failed:', e.message);
-        }
-      }
+      await setCache(cacheKey, exam, 600);
     }
 
     // assigned check
-    const isAssigned = exam.assignedTo?.some(id => id.toString() === req.user._id.toString());
+    const isAssigned = exam.assignedTo?.some(id => id.toString() === userId);
     if (!isAssigned) return res.status(403).json({ success: false, message: 'You are not assigned to this exam' });
 
     // time check
@@ -71,7 +68,7 @@ exports.startExam = async (req, res, next) => {
     }
 
     // Find attempt
-    let attempt = await ExamAttempt.findOne({ exam: examId, examinee: req.user._id });
+    let attempt = await ExamAttempt.findOne({ exam: examId, examinee: req.user._id }).lean();
 
     if (attempt && attempt.status !== 'in-progress') {
       return res.status(400).json({ success: false, message: 'You have already submitted this exam' });
@@ -86,67 +83,139 @@ exports.startExam = async (req, res, next) => {
       // If Random mode, pick questions now for THIS specific user
       if (exam.selectionMode === 'random' && exam.randomConfig) {
         const conf = exam.randomConfig;
-        const filter = { isActive: true };
+        const filter = {
+          isActive: true,
+          createdBy: exam.createdBy
+        };
         if (conf.subjectIds?.length) filter.subject = { $in: conf.subjectIds };
         if (conf.difficulty) filter.difficulty = conf.difficulty;
 
-        if (conf.mcqCount > 0 || conf.theoryCount > 0) {
+        if ((conf.mcqCount || 0) > 0 || (conf.theoryCount || 0) > 0 || (conf.passageCount || 0) > 0) {
           // Case 2: Split Mode
           const mcqs = await Question.aggregate([
             { $match: { ...filter, type: 'mcq' } },
-            { $sample: { size: conf.mcqCount } }
+            { $sample: { size: conf.mcqCount } },
+            { $project: { _id: 1, type: 1, options: 1, subQuestions: 1 } }
           ]);
           const theories = await Question.aggregate([
             { $match: { ...filter, type: 'theory' } },
-            { $sample: { size: conf.theoryCount } }
+            { $sample: { size: conf.theoryCount } },
+            { $project: { _id: 1, type: 1, options: 1, subQuestions: 1 } }
           ]);
-          selectedQuestions = [...mcqs, ...theories];
+          const passages = await Question.aggregate([
+            { $match: { ...filter, type: 'passage' } },
+            { $sample: { size: conf.passageCount || 0 } },
+            { $project: { _id: 1, type: 1, options: 1, subQuestions: 1 } }
+          ]);
+          selectedQuestions = [...mcqs, ...theories, ...passages];
         } else {
           // Case 1: Any Type Mode
           selectedQuestions = await Question.aggregate([
             { $match: filter },
-            { $sample: { size: conf.totalQuestions } }
+            { $sample: { size: conf.totalQuestions } },
+            { $project: { _id: 1, type: 1, options: 1, subQuestions: 1 } }
           ]);
         }
       } else {
-        // Manual Mode: use fixed questions
-        selectedQuestions = exam.questions.map(q => q.question);
+        // Manual Mode: use fixed questions and fetch only fields needed for attempt creation.
+        const fixedIds = (exam.questions || []).map((q) => q.question).filter(Boolean);
+        selectedQuestions = await Question.find({ _id: { $in: fixedIds } })
+          .select('_id type options subQuestions')
+          .lean();
       }
 
-      // Create Attempt
-      attempt = await ExamAttempt.create({
-        exam: examId,
-        examinee: req.user._id,
-        answers: selectedQuestions.map(q => ({
-          question: q._id,
-          // Shuffle options logic here
-          optionOrder: (exam.shuffleOptions && q.type === 'mcq') ? shuffleIndices(q.options.length) : []
-        }))
-      });
-    }
+      // Apply question-order shuffle for this attempt when enabled.
+      // For random mode, allow either exam.shuffleQuestions or randomConfig.shuffleSelectedQuestions.
+      const shouldShuffleQuestionOrder =
+        !!exam.shuffleQuestions ||
+        (exam.selectionMode === 'random' && !!exam.randomConfig?.shuffleSelectedQuestions);
 
-    // Now return SAFE exam only with attempt-selected questions
-    const attemptQuestionIds = attempt.answers.map(a => a.question.toString());
-    const qDocs = await Question.find({ _id: { $in: attemptQuestionIds } }).lean();
-    const qMap = new Map(qDocs.map(q => [q._id.toString(), q]));
+      if (shouldShuffleQuestionOrder && selectedQuestions.length > 1) {
+        selectedQuestions = shuffleArray(selectedQuestions);
+      }
 
-    const safeQuestions = attempt.answers.map((a) => {
-      const q = qMap.get(a.question.toString());
-      if (!q) return null;
-
-      const safeQ = { ...q };
-      if (safeQ.type === 'mcq') {
-        delete safeQ.correctOption;
-
-        // Apply option shuffle using attempt mapping
-        if (exam.shuffleOptions && Array.isArray(a.optionOrder) && Array.isArray(safeQ.options)) {
-          if (a.optionOrder.length === safeQ.options.length) {
-            safeQ.options = a.optionOrder.map(idx => safeQ.options[idx]);
-          }
+      // Create Attempt (idempotent for double-start race)
+      try {
+        attempt = await ExamAttempt.create({
+          exam: examId,
+          examinee: req.user._id,
+          answers: selectedQuestions.map(q => ({
+            question: q._id,
+            optionOrder: (exam.shuffleOptions && q.type === 'mcq') ? shuffleIndices(q.options.length) : [],
+            passageOptionOrders: (exam.shuffleOptions && q.type === 'passage')
+              ? (q.subQuestions || [])
+                .filter((sq) => sq.type === 'mcq' && Array.isArray(sq.options) && sq.options.length > 1)
+                .map((sq) => ({
+                  subQuestionId: String(sq._id),
+                  optionOrder: shuffleIndices(sq.options.length)
+                }))
+              : []
+          }))
+        });
+      } catch (createErr) {
+        if (createErr.code === 11000) {
+          attempt = await ExamAttempt.findOne({ exam: examId, examinee: req.user._id }).lean();
+        } else {
+          throw createErr;
         }
       }
-      return { question: safeQ };
-    }).filter(Boolean);
+
+      createdNew = true;
+    }
+
+    // For resume/start retries, cache prepared safe questions per attempt for a short window.
+    const attemptCacheKey = `attempt:${attempt._id}:safeQuestions`;
+    let safeQuestions = null;
+    safeQuestions = await getCache(attemptCacheKey);
+
+    // Now return SAFE exam only with attempt-selected questions
+    if (!safeQuestions) {
+      const attemptQuestionIds = attempt.answers.map(a => a.question.toString());
+      const qDocs = await Question.find({
+        _id: { $in: attemptQuestionIds }
+      })
+        .select('_id type question options credit subject topic category difficulty tags explanation subQuestions passageRef')
+        .populate('passageRef', 'title text topic complexity marksLabel')
+        .lean();
+      const qMap = new Map(qDocs.map(q => [q._id.toString(), q]));
+
+      safeQuestions = attempt.answers.map((a) => {
+        const q = qMap.get(a.question.toString());
+        if (!q) return null;
+
+        const safeQ = { ...q };
+        if (safeQ.type === 'mcq') {
+          delete safeQ.correctOption;
+
+          // Apply option shuffle using attempt mapping
+          if (exam.shuffleOptions && Array.isArray(a.optionOrder) && Array.isArray(safeQ.options)) {
+            if (a.optionOrder.length === safeQ.options.length) {
+              safeQ.options = a.optionOrder.map(idx => safeQ.options[idx]);
+            }
+          }
+        }
+        if (safeQ.type === 'passage' && Array.isArray(safeQ.subQuestions)) {
+          safeQ.subQuestions = safeQ.subQuestions.map((sq) => {
+            const out = { ...sq };
+            if (out.type === 'mcq') {
+              delete out.correctOption;
+              if (exam.shuffleOptions && Array.isArray(out.options)) {
+                const sqOrder = (a.passageOptionOrders || []).find(
+                  (po) => String(po.subQuestionId) === String(out._id)
+                )?.optionOrder;
+                if (Array.isArray(sqOrder) && sqOrder.length === out.options.length) {
+                  out.options = sqOrder.map((idx) => out.options[idx]);
+                }
+              }
+            }
+            return out;
+          });
+        }
+        return { question: safeQ };
+      }).filter(Boolean);
+
+      await setCache(attemptCacheKey, safeQuestions, 180);
+    }
 
     const safeExam = {
       _id: exam._id,
@@ -178,7 +247,7 @@ exports.startExam = async (req, res, next) => {
 // Save answer - unchanged (perfect as is)
 exports.saveAnswer = async (req, res, next) => {
   try {
-    const { questionId, selectedOption, textAnswer } = req.body;
+    const { questionId, selectedOption, textAnswer, subQuestionId } = req.body;
     const attempt = await ExamAttempt.findById(req.params.attemptId);
 
     if (!attempt) return res.status(404).json({ success: false, message: 'Attempt not found' });
@@ -203,7 +272,26 @@ exports.saveAnswer = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Question not found' });
     }
 
-    if (selectedOption !== undefined) {
+    const qDoc = await Question.findById(questionId).select('type subQuestions');
+
+    if (qDoc?.type === 'passage' && subQuestionId) {
+      const subExists = (qDoc.subQuestions || []).some((sq) => String(sq._id) === String(subQuestionId));
+      if (!subExists) {
+        return res.status(400).json({ success: false, message: 'Invalid passage sub question' });
+      }
+      const responses = attempt.answers[answerIndex].passageResponses || [];
+      const idx = responses.findIndex((r) => String(r.subQuestionId) === String(subQuestionId));
+      const payload = {
+        subQuestionId: String(subQuestionId),
+        ...(selectedOption !== undefined ? { selectedOption: Number(selectedOption) } : {}),
+        ...(textAnswer !== undefined ? { textAnswer } : {})
+      };
+      if (idx >= 0) responses[idx] = { ...responses[idx].toObject?.() || responses[idx], ...payload };
+      else responses.push(payload);
+      attempt.answers[answerIndex].passageResponses = responses;
+    }
+
+    if (qDoc?.type !== 'passage' && selectedOption !== undefined) {
       const sel = Number(selectedOption);
 
       const order = attempt.answers[answerIndex].optionOrder;
@@ -218,7 +306,7 @@ exports.saveAnswer = async (req, res, next) => {
 
       attempt.answers[answerIndex].selectedOption = sel;
     }
-    if (textAnswer !== undefined) attempt.answers[answerIndex].textAnswer = textAnswer;
+    if (qDoc?.type !== 'passage' && textAnswer !== undefined) attempt.answers[answerIndex].textAnswer = textAnswer;
 
     await attempt.save();
     res.json({ success: true, message: 'Answer saved' });
@@ -244,7 +332,10 @@ exports.submitExam = async (req, res, next) => {
 
     await attempt.calculateMCQScore();
 
-    const hasTheory = attempt.answers.some(a => a.question?.type === 'theory');
+    const hasTheory = attempt.answers.some(a =>
+      a.question?.type === 'theory' ||
+      (a.question?.type === 'passage' && (a.question?.subQuestions || []).some((sq) => sq.type === 'theory'))
+    );
     attempt.status = hasTheory ? 'submitted' : 'evaluated';
 
     await attempt.save();
@@ -292,7 +383,10 @@ exports.getMyAttempts = async (req, res, next) => {
     const attempts = await ExamAttempt.find({ examinee: req.user._id })
       .populate('exam', 'title totalMarks')
       .populate('examinee', 'username firstname lastname') // ✅ FIX 1
-      .populate('answers.question') // ✅ FIX 2
+      .populate({
+        path: 'answers.question',
+        populate: { path: 'passageRef' }
+      }) // include passage details
       .sort('-createdAt');
 
     res.status(200).json({
@@ -309,7 +403,7 @@ exports.getMyAttempts = async (req, res, next) => {
 // @access  Private (SuperUser)
 exports.evaluateTheoryAnswers = async (req, res, next) => {
   try {
-    const { answers } = req.body; // Array of { questionId, marksObtained, feedback }
+    const { answers } = req.body; // Array of { questionId, subQuestionId?, marksObtained, feedback }
 
     if (!answers || !Array.isArray(answers)) {
       return res.status(400).json({
@@ -328,30 +422,48 @@ exports.evaluateTheoryAnswers = async (req, res, next) => {
       });
     }
 
-    // Update theory answers
-    answers.forEach(({ questionId, marksObtained, feedback }) => {
+    // Update theory answers (normal + passage sub-questions)
+    answers.forEach(({ questionId, subQuestionId, marksObtained, feedback }) => {
       const answerIndex = attempt.answers.findIndex(
         a => a.question._id.toString() === questionId
       );
 
-      if (answerIndex !== -1 && attempt.answers[answerIndex].question.type === 'theory') {
-        attempt.answers[answerIndex].marksObtained = marksObtained;
-        attempt.answers[answerIndex].feedback = feedback;
-        attempt.answers[answerIndex].reviewedBy = req.user._id;
+      if (answerIndex === -1) return;
+
+      const ans = attempt.answers[answerIndex];
+      const q = ans.question;
+
+      if (q.type === 'theory') {
+        ans.marksObtained = marksObtained;
+        ans.feedback = feedback;
+        ans.reviewedBy = req.user._id;
+        return;
+      }
+
+      if (q.type === 'passage' && subQuestionId) {
+        const sub = (q.subQuestions || []).find((sq) => sq._id.toString() === subQuestionId);
+        if (!sub || sub.type !== 'theory') return;
+
+        const responses = ans.passageResponses || [];
+        const rIndex = responses.findIndex((r) => String(r.subQuestionId) === String(subQuestionId));
+
+        if (rIndex !== -1) {
+          responses[rIndex].marksObtained = marksObtained;
+          responses[rIndex].feedback = feedback;
+        } else {
+          responses.push({
+            subQuestionId: String(subQuestionId),
+            marksObtained,
+            feedback
+          });
+        }
+
+        ans.passageResponses = responses;
       }
     });
 
-    // Recalculate total marks
-    attempt.totalMarksObtained = attempt.answers.reduce(
-      (sum, ans) => sum + (ans.marksObtained || 0),
-      0
-    );
-
-    // Recalculate percentage
-    const exam = await Exam.findById(attempt.exam);
-    if (exam && exam.totalMarks > 0) {
-      attempt.percentage = (attempt.totalMarksObtained / exam.totalMarks) * 100;
-    }
+    // Recalculate score with MCQ + evaluated theory (normal/passage)
+    await attempt.calculateMCQScore();
 
     attempt.status = 'evaluated';
     await attempt.save();
@@ -374,7 +486,10 @@ exports.downloadAttemptPDF = async (req, res) => {
     const attempt = await ExamAttempt.findById(req.params.attemptId)
       .populate('exam')
       .populate('examinee')
-      .populate('answers.question');
+      .populate({
+        path: 'answers.question',
+        populate: { path: 'passageRef' }
+      });
 
     if (!attempt) {
       return res.status(404).json({ success: false, message: 'Attempt not found' });
@@ -426,9 +541,41 @@ exports.downloadAttemptPDF = async (req, res) => {
           `Marks: ${ans.marksObtained} / ${q.credit} | ${ans.isCorrect ? 'Correct' : 'Incorrect'}`,
           { indent: 20 }
         );
-      } else {
+      } else if (q.type === 'theory') {
         doc.text(`Answer: ${ans.textAnswer || '-'}`, { indent: 20 });
         doc.text(`Marks: ${ans.marksObtained} / ${q.credit}`, { indent: 20 });
+      } else if (q.type === 'passage') {
+        if (q.passageRef?.title) {
+          doc.fontSize(11).text(`Passage: ${q.passageRef.title}`, { indent: 20 });
+        }
+        if (q.passageRef?.text) {
+          doc.fontSize(10).text(q.passageRef.text, { indent: 20 });
+        }
+        if (q.passageRef?.marksLabel) {
+          doc.fontSize(10).text(`Passage Marks: ${q.passageRef.marksLabel}`, { indent: 20 });
+        }
+        doc.moveDown(0.4);
+
+        (q.subQuestions || []).forEach((sq, sqIndex) => {
+          const resp = (ans.passageResponses || []).find(
+            (r) => String(r.subQuestionId) === String(sq._id)
+          );
+          doc.fontSize(10).text(`  ${sqIndex + 1}. ${sq.prompt}`, { indent: 20 });
+
+          if (sq.type === 'mcq') {
+            (sq.options || []).forEach((opt, idx) => {
+              const selected = Number(resp?.selectedOption) === idx;
+              const marker = selected ? 'Selected' : '';
+              doc.text(`     ${String.fromCharCode(65 + idx)}. ${opt} ${marker}`, { indent: 20 });
+            });
+          } else {
+            doc.text(`     Answer: ${resp?.textAnswer || '-'}`, { indent: 20 });
+          }
+
+          const obtained = resp?.marksObtained ?? 0;
+          doc.text(`     Marks: ${obtained} / ${sq.credit}`, { indent: 20 });
+          doc.moveDown(0.3);
+        });
       }
 
       doc.moveDown();
@@ -440,3 +587,4 @@ exports.downloadAttemptPDF = async (req, res) => {
     res.status(500).json({ success: false, message: 'Failed to generate PDF' });
   }
 };
+
