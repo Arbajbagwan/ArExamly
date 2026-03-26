@@ -4,6 +4,7 @@ import Navbar from '../../components/common/Navbar';
 import Sidebar from '../../components/common/Sidebar';
 import Loader from '../../components/common/Loader';
 import { examService } from '../../services/examService';
+import AppCard from '../../components/common/AppCard';
 
 const ExamineeDashboard = () => {
   const [exams, setExams] = useState([]);
@@ -62,12 +63,13 @@ const ExamineeDashboard = () => {
   };
 
   const formatDateTime = (exam) => {
+    if (exam.startAt && exam.endAt) {
+      return `${new Date(exam.startAt).toLocaleString()} - ${new Date(exam.endAt).toLocaleString()}`;
+    }
     if (!exam.scheduledDate) return 'Not scheduled';
-
     const date = new Date(exam.scheduledDate).toLocaleDateString();
     const start = exam.startTime || '';
     const end = exam.endTime || '';
-
     return start && end ? `${date} | ${start} - ${end}` : date;
   };
 
@@ -76,7 +78,9 @@ const ExamineeDashboard = () => {
       return { type: 'evaluated' };
     }
 
-    if (exam.myAttemptStatus === 'submitted' || exam.myAttemptStatus === 'auto-submitted') {
+    const hasSubmittedAt = Boolean(exam.myAttemptSubmittedAt);
+
+    if ((exam.myAttemptStatus === 'submitted' || exam.myAttemptStatus === 'auto-submitted') && hasSubmittedAt) {
       return { type: 'submitted' };
     }
 
@@ -91,7 +95,16 @@ const ExamineeDashboard = () => {
     if (exam.status === 'active' && !exam.myAttemptStatus) {
       return {
         type: 'link',
-        label: 'Take Exam',
+        label: 'Start Exam',
+        href: `/examinee/exam/${exam._id}`
+      };
+    }
+
+    // Handle inconsistent legacy rows where status says submitted but submittedAt is missing.
+    if ((exam.myAttemptStatus === 'submitted' || exam.myAttemptStatus === 'auto-submitted') && !hasSubmittedAt) {
+      return {
+        type: 'link',
+        label: 'Resume Exam',
         href: `/examinee/exam/${exam._id}`
       };
     }
@@ -106,9 +119,9 @@ const ExamineeDashboard = () => {
       <Navbar />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
-        <main className="flex-1 overflow-y-auto bg-gray-100 p-6">
+        <main className="flex-1 overflow-y-auto bg-base-200 p-3">
           <div className="max-w-7xl mx-auto">
-            <h1 className="text-3xl font-bold mb-6">Available Exams</h1>
+            <h1 className="text-3xl font-bold mb-6">Exams</h1>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               {exams.length === 0 ? (
@@ -120,49 +133,39 @@ const ExamineeDashboard = () => {
                   const { mcq, theory, passage } = getQuestionCounts(exam);
 
                   return (
-                    <div
-                      key={exam._id}
-                      className="bg-white rounded-lg shadow-md p-6 hover:shadow-lg transition"
-                    >
+                    <AppCard key={exam._id} className="hover:shadow-md transition-shadow">
                       <h3 className="text-xl font-bold mb-2">{exam.title}</h3>
-                      <p className="text-gray-600 mb-4">{exam.description || 'No description'}</p>
+                      <p className="text-base-content/70 mb-2">{exam.description || 'No description'}</p>
 
-                      <div className="space-y-2 mb-4">
+                      <div className="space-y-2 mb-2">
 
                         <div className="flex justify-between">
-                          <span className="text-sm text-gray-500">Date & Time:</span>
+                          <span className="text-sm text-base-content/70">Date & Time:</span>
                           <span className="text-sm font-medium">
                             {formatDateTime(exam)}
                           </span>
                         </div>
 
                         <div className="flex justify-between">
-                          <span className="text-sm text-gray-500">Duration:</span>
+                          <span className="text-sm text-base-content/70">Duration:</span>
                           <span className="text-sm font-medium">{exam.duration} mins</span>
                         </div>
 
                         <div className="flex justify-between">
-                          <span className="text-sm text-gray-500">Questions:</span>
+                          <span className="text-sm text-base-content/70">Questions:</span>
                           <span className="text-sm font-medium">
                             {mcq} MCQ{theory > 0 && `, ${theory} Theory`}{passage > 0 && `, ${passage} Passage`}
                           </span>
                         </div>
 
                         <div className="flex justify-between">
-                          <span className="text-sm text-gray-500">Total Marks:</span>
+                          <span className="text-sm text-base-content/70">Total Marks:</span>
                           <span className="text-sm font-medium">{exam.totalMarks}</span>
                         </div>
 
                         <div className="flex justify-between">
-                          <span className="text-sm text-gray-500">Status:</span>
-                          <span
-                            className={`text-sm font-medium ${exam.status === 'active'
-                              ? 'text-green-600'
-                              : exam.status === 'scheduled'
-                                ? 'text-blue-600'
-                                : 'text-gray-600'
-                              }`}
-                          >
+                          <span className="text-sm text-base-content/70">Status:</span>
+                          <span className={`badge badge-sm ${exam.status === 'active' ? 'badge-success' : exam.status === 'scheduled' ? 'badge-info' : 'badge-neutral'}`}>
                             {exam.status.toUpperCase()}
                           </span>
                         </div>
@@ -174,8 +177,8 @@ const ExamineeDashboard = () => {
 
                         if (action.type === 'submitted') {
                           return (
-                            <div className="w-full text-center py-2 rounded-lg bg-yellow-100 text-yellow-700 font-medium text-sm">
-                              SUBMITTED
+                            <div className="w-full text-center py-2 rounded-lg bg-warning/20 text-warning font-medium text-sm">
+                              Pending Evaluation
                             </div>
                           );
                         }
@@ -184,9 +187,9 @@ const ExamineeDashboard = () => {
                           return (
                             <Link
                               to="/examinee/results"
-                              className="block w-full text-center py-2 rounded-lg bg-green-100 text-green-700 font-medium text-sm hover:bg-green-200 transition"
+                              className="btn btn-success btn-sm w-full"
                             >
-                              VIEW RESULT
+                              Completed - View Result
                             </Link>
                           );
                         }
@@ -194,14 +197,14 @@ const ExamineeDashboard = () => {
                         return (
                           <Link
                             to={action.href}
-                            className="block w-full text-center bg-blue-500 text-white py-2 rounded-lg hover:bg-blue-600 transition"
+                            className="btn btn-primary btn-sm w-full"
                           >
                             {action.label}
                           </Link>
                         );
                       })()}
 
-                    </div>
+                    </AppCard>
                   )
                 })
               )}

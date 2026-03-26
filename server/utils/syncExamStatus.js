@@ -1,18 +1,27 @@
 // Utility to sync exam status based on current time
 module.exports = async function syncExamStatus(exam) {
-    if (!exam.scheduledDate || !exam.startTime || !exam.endTime) {
+    const resolveWindow = (e) => {
+        if (e.startAt && e.endAt) {
+            return { start: new Date(e.startAt), end: new Date(e.endAt) };
+        }
+        if (e.scheduledDate && e.startTime && e.endTime) {
+            const start = new Date(e.scheduledDate);
+            const [sh, sm] = String(e.startTime).split(':');
+            start.setHours(Number(sh), Number(sm), 0, 0);
+            const end = new Date(e.scheduledDate);
+            const [eh, em] = String(e.endTime).split(':');
+            end.setHours(Number(eh), Number(em), 0, 0);
+            return { start, end };
+        }
+        return { start: null, end: null };
+    };
+
+    const { start, end } = resolveWindow(exam);
+    if (!start || !end) {
         return exam;
     }
 
     const now = new Date();
-
-    const start = new Date(exam.scheduledDate);
-    const [sh, sm] = exam.startTime.split(':');
-    start.setHours(sh, sm, 0, 0);
-
-    const end = new Date(exam.scheduledDate);
-    const [eh, em] = exam.endTime.split(':');
-    end.setHours(eh, em, 0, 0);
 
     let newStatus = exam.status;
 

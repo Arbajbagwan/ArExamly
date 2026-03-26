@@ -28,7 +28,12 @@ export const ExamProvider = ({ children }) => {
 
   const fetchQuestions = useCallback(async () => {
     const res = await questionService.getQuestions();
-    setQuestions(res.questions || []);
+    const sorted = [...(res.questions || [])].sort((a, b) => {
+      const aTime = new Date(a?.createdAt || 0).getTime();
+      const bTime = new Date(b?.createdAt || 0).getTime();
+      return aTime - bTime;
+    });
+    setQuestions(sorted);
   }, []);
 
   const fetchSubjects = useCallback(async () => {

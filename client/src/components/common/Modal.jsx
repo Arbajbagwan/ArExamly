@@ -1,6 +1,14 @@
 import React from 'react';
 
-const Modal = ({ isOpen, onClose, title, children, size = 'medium' }) => {
+const Modal = ({
+  isOpen,
+  onClose,
+  title,
+  children,
+  size = 'medium',
+  backdropZ = 'z-40',
+  modalZ = 'z-50'
+}) => {
   if (!isOpen) return null;
 
   const sizeClasses = {
@@ -14,15 +22,15 @@ const Modal = ({ isOpen, onClose, title, children, size = 'medium' }) => {
     <>
       {/* Backdrop */}
       <div 
-        className="fixed inset-0 bg-black/50 z-40"
+        className={`fixed inset-0 bg-black/50 ${backdropZ}`}
         onClick={onClose}
       ></div>
       
       {/* Modal */}
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className={`fixed inset-0 ${modalZ} flex items-center justify-center p-4`}>
         <div className={`bg-base-100 rounded-lg shadow-xl w-full ${sizeClasses[size]} max-h-[90vh] overflow-y-auto`}>
           {/* Header */}
-          <div className="flex justify-between items-center p-4 border-b border-base-300">
+          <div className="flex justify-between items-center p-2 border-b border-base-300">
             <h3 className="font-bold text-lg">{title}</h3>
             <button 
               onClick={onClose} 
@@ -33,7 +41,7 @@ const Modal = ({ isOpen, onClose, title, children, size = 'medium' }) => {
           </div>
           
           {/* Body */}
-          <div className="p-4">
+          <div className="p-2">
             {children}
           </div>
         </div>

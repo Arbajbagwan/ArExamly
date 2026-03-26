@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { getPassages, createPassage } = require('../controllers/passageController');
+const { getPassages, createPassage, updatePassage, deletePassage } = require('../controllers/passageController');
 const { protect } = require('../middleware/authMiddleware');
 const { restrictTo } = require('../middleware/roleMiddleware');
 
@@ -10,5 +10,9 @@ router.use(restrictTo('admin', 'superuser'));
 router.route('/')
   .get(getPassages)
   .post(createPassage);
+
+router.route('/:id')
+  .put(updatePassage)
+  .delete(deletePassage);
 
 module.exports = router;

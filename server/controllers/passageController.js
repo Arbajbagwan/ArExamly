@@ -33,3 +33,58 @@ exports.createPassage = async (req, res, next) => {
     next(err);
   }
 };
+
+exports.updatePassage = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const passage = await Passage.findOneAndUpdate(
+      ownerFilter(req, { _id: id }),
+      req.body,
+      { new: true, runValidators: true }
+    );
+
+    if (!passage) {
+      return res.status(404).json({
+        success: false,
+        message: "Passage not found"
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      passage
+    });
+
+  } catch (err) {
+    next(err);
+  }
+};
+
+
+exports.deletePassage = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const passage = await Passage.findOneAndUpdate(
+      ownerFilter(req, { _id: id }),
+      { isActive: false },
+      { new: true }
+    );
+
+    if (!passage) {
+      return res.status(404).json({
+        success: false,
+        message: "Passage not found"
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Passage deleted"
+    });
+
+  } catch (err) {
+    next(err);
+  }
+};

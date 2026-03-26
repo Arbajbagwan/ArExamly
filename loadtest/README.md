@@ -18,7 +18,7 @@ Copy-Item .\loadtest\users.csv.example .\loadtest\users.csv
 
 ```powershell
 k6 run `
-  -e BASE_URL=http://localhost:5000 `
+  -e BASE_URL=http://localhost:5011 `
   -e EXAM_ID=PUT_REAL_EXAM_ID `
   -e USERS_CSV=.\loadtest\users.csv `
   .\loadtest\k6-exam-flow.js
@@ -35,7 +35,7 @@ Override stages:
 
 ```powershell
 k6 run `
-  -e BASE_URL=http://localhost:5000 `
+  -e BASE_URL=http://localhost:5011 `
   -e EXAM_ID=PUT_REAL_EXAM_ID `
   -e USERS_CSV=.\loadtest\users.csv `
   -e START_VUS=20 `

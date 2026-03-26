@@ -15,6 +15,8 @@ const AdminDashboard = () => {
   const [formData, setFormData] = useState({
     firstname: '',
     lastname: '',
+    sbu: '',
+    group: '',
     username: '',
     email: '',
     password: ''
@@ -39,6 +41,8 @@ const AdminDashboard = () => {
     setFormData({
       firstname: '',
       lastname: '',
+      sbu: '',
+      group: '',
       username: '',
       email: '',
       password: ''
@@ -81,6 +85,8 @@ const AdminDashboard = () => {
     setFormData({
       firstname: user.firstname || '',
       lastname: user.lastname || '',
+      sbu: user.sbu || '',
+      group: user.group || '',
       username: user.username || '',
       email: user.email || '',
       password: ''
@@ -103,128 +109,143 @@ const AdminDashboard = () => {
   if (loading) return <Loader />;
 
   return (
-    <div className="flex flex-col h-screen bg-gray-100">
+    <div className="flex flex-col h-screen bg-base-200">
       <Navbar />
+
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
-        <main className="flex-1 overflow-y-auto p-6">
-          <div className="max-w-7xl mx-auto">
+
+        <main className="flex-1 flex flex-col overflow-hidden p-3">
+          <div className="flex flex-col flex-1 min-h-0 max-w-7xl mx-auto w-full">
+
             {/* Header */}
-            <div className="flex flex-col md:flex-row md:items-center md:justify-between mb-6">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between mb-4">
               <div>
-                <h1 className="text-2xl font-bold text-gray-800">Super Users</h1>
-                <p className="text-gray-500 mt-1">Manage super user accounts</p>
+                <h1 className="text-2xl font-bold">Super Users</h1>
+                <p className="text-base-content/70 mt-1">
+                  Manage super user accounts
+                </p>
               </div>
+
               <button
                 onClick={openCreateModal}
-                className="mt-4 md:mt-0 inline-flex items-center px-4 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 transition-colors"
+                className="btn btn-primary mt-4 md:mt-0"
               >
-                <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                </svg>
                 Add Super User
               </button>
             </div>
 
-            {/* Stats Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
-              <div className="bg-white rounded-xl shadow-sm p-6 border border-gray-200">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm text-gray-500">Total Super Users</p>
-                    <p className="text-3xl font-bold text-gray-800 mt-1">{superusers.length}</p>
-                  </div>
-                  <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
-                    <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
-                    </svg>
-                  </div>
-                </div>
+
+            {/* Stats */}
+            <div className="grid grid-cols-3 gap-2 mb-2 text-xs">
+
+              <div className="bg-base-100 border border-base-300 rounded p-2 text-center">
+                <p className="text-base-content/60">Total</p>
+                <p className="font-semibold">{superusers.length}</p>
               </div>
 
-              <div className="bg-white rounded-xl shadow-sm p-6 border border-gray-200">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm text-gray-500">Active</p>
-                    <p className="text-3xl font-bold text-green-600 mt-1">{superusers.filter(u => u.isActive).length}</p>
-                  </div>
-                  <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
-                    <svg className="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                  </div>
-                </div>
+              <div className="bg-base-100 border border-base-300 rounded p-2 text-center">
+                <p className="text-base-content/60">Active</p>
+                <p className="font-semibold text-success">
+                  {superusers.filter(u => u.isActive).length}
+                </p>
               </div>
 
-              <div className="bg-white rounded-xl shadow-sm p-6 border border-gray-200">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm text-gray-500">Inactive</p>
-                    <p className="text-3xl font-bold text-red-600 mt-1">{superusers.filter(u => !u.isActive).length}</p>
-                  </div>
-                  <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center">
-                    <svg className="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                  </div>
-                </div>
+              <div className="bg-base-100 border border-base-300 rounded p-2 text-center">
+                <p className="text-base-content/60">Inactive</p>
+                <p className="font-semibold text-error">
+                  {superusers.filter(u => !u.isActive).length}
+                </p>
               </div>
+
             </div>
 
+
             {/* Table */}
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead className="bg-gray-50 border-b border-gray-200">
+            <div className="bg-base-100 border border-base-300 rounded flex flex-col flex-1 overflow-hidden">
+
+              <div className="overflow-auto flex-1">
+
+                <table className="table table-xs table-zebra">
+
+                  <thead className="bg-base-200 sticky top-0 z-10">
                     <tr>
-                      <th className="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">User</th>
-                      <th className="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Username</th>
-                      <th className="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Email</th>
-                      <th className="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
-                      <th className="px-6 py-4 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
+                      <th>User</th>
+                      <th>Username</th>
+                      <th>SBU</th>
+                      <th>Group</th>
+                      <th>Email</th>
+                      <th>Status</th>
+                      <th className="text-right">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-gray-200">
+
+                  <tbody>
+
                     {superusers.length === 0 ? (
                       <tr>
-                        <td colSpan="5" className="px-6 py-12 text-center text-gray-500">
-                          No super users found. Click "Add Super User" to create one.
+                        <td colSpan="7" className="py-12 text-center text-base-content/70">
+                          No super users found.
                         </td>
                       </tr>
                     ) : (
                       superusers.map((user) => (
-                        <tr key={user._id} className="hover:bg-gray-50 transition-colors">
-                          <td className="px-6 py-4">
-                            <div className="flex items-center">
-                              <div className="w-10 h-10 bg-blue-500 rounded-full flex items-center justify-center text-white font-semibold">
-                                {user.firstname?.charAt(0)}{user.lastname?.charAt(0)}
+                        <tr key={user._id} className="hover">
+
+                          <td>
+                            <div className="flex items-center gap-2">
+                              <div className="w-8 h-8 bg-primary rounded-full flex items-center justify-center text-white text-xs font-semibold">
+                                {user.firstname?.charAt(0)}
+                                {user.lastname?.charAt(0)}
                               </div>
-                              <div className="ml-4">
-                                <p className="font-medium text-gray-800">{user.firstname} {user.lastname}</p>
+
+                              <div>
+                                <p className="font-medium">
+                                  {user.firstname} {user.lastname}
+                                </p>
                               </div>
                             </div>
                           </td>
-                          <td className="px-6 py-4 text-gray-600">@{user.username}</td>
-                          <td className="px-6 py-4 text-gray-600">{user.email || 'N/A'}</td>
-                          <td className="px-6 py-4">
-                            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                              user.isActive 
-                                ? 'bg-green-100 text-green-800' 
-                                : 'bg-red-100 text-red-800'
-                            }`}>
-                              {user.isActive ? 'Active' : 'Inactive'}
+
+                          <td className="text-base-content/70">
+                            @{user.username}
+                          </td>
+
+                          <td className="text-base-content/70">
+                            {user.sbu || 'N/A'}
+                          </td>
+
+                          <td className="text-base-content/70">
+                            {user.group || 'N/A'}
+                          </td>
+
+                          <td className="text-base-content/70">
+                            {user.email || "N/A"}
+                          </td>
+
+                          <td>
+                            <span
+                              className={`badge badge-sm ${user.isActive
+                                  ? "badge-success"
+                                  : "badge-error"
+                                }`}
+                            >
+                              {user.isActive ? "Active" : "Inactive"}
                             </span>
                           </td>
-                          <td className="px-6 py-4 text-right">
+
+                          <td className="text-right">
+
                             <button
                               onClick={() => handleEdit(user)}
-                              className="text-blue-600 hover:text-blue-800 font-medium mr-4"
+                              className="btn btn-ghost btn-xs text-info mr-2"
                             >
                               Edit
                             </button>
+
                             <button
                               onClick={() => handleDelete(user._id)}
-                              className="text-red-600 hover:text-red-800 font-medium"
+                              className="btn btn-ghost btn-xs text-error"
                             >
                               Delete
                             </button>
@@ -244,87 +265,142 @@ const AdminDashboard = () => {
       <Modal
         isOpen={showModal}
         onClose={closeModal}
-        title={editingId ? 'Edit Super User' : 'Add Super User'}
+        title={editingId ? "Edit Super User" : "Add Super User"}
+        size="medium"
       >
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+
+        <form onSubmit={handleSubmit} className="space-y-2 text-sm">
+
+          <div className="grid grid-cols-2 gap-2">
+
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">First Name *</label>
+              <label className="text-[11px] text-base-content/70">
+                First Name<span className="text-error">*</span>
+              </label>
               <input
                 type="text"
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                className="input input-bordered input-xs w-full h-8 mt-0.5"
                 value={formData.firstname}
-                onChange={(e) => setFormData({ ...formData, firstname: e.target.value })}
+                onChange={(e) =>
+                  setFormData({ ...formData, firstname: e.target.value })
+                }
                 required
               />
             </div>
+
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Last Name *</label>
+              <label className="text-[11px] text-base-content/70">
+                Last Name
+              </label>
               <input
                 type="text"
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                className="input input-bordered input-xs w-full h-8 mt-0.5"
                 value={formData.lastname}
-                onChange={(e) => setFormData({ ...formData, lastname: e.target.value })}
-                required
+                onChange={(e) =>
+                  setFormData({ ...formData, lastname: e.target.value })
+                }
               />
             </div>
+
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Username *</label>
+            <label className="text-[11px] text-base-content/70">SBU</label>
             <input
               type="text"
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+              className="input input-bordered input-xs w-full h-8 mt-0.5"
+              value={formData.sbu}
+              onChange={(e) =>
+                setFormData({ ...formData, sbu: e.target.value })
+              }
+            />
+          </div>
+
+          <div>
+            <label className="text-[11px] text-base-content/70">Group</label>
+            <input
+              type="text"
+              className="input input-bordered input-xs w-full h-8 mt-0.5"
+              value={formData.group}
+              onChange={(e) =>
+                setFormData({ ...formData, group: e.target.value })
+              }
+            />
+          </div>
+
+
+          <div>
+            <label className="text-[11px] text-base-content/70">
+              Username<span className="text-error">*</span>
+            </label>
+            <input
+              type="text"
+              className="input input-bordered input-xs w-full h-8 mt-0.5"
               value={formData.username}
-              onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+              onChange={(e) =>
+                setFormData({ ...formData, username: e.target.value })
+              }
               required
             />
           </div>
 
+
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+            <label className="text-[11px] text-base-content/70">Email</label>
             <input
               type="email"
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+              className="input input-bordered input-xs w-full h-8 mt-0.5"
               value={formData.email}
-              onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+              onChange={(e) =>
+                setFormData({ ...formData, email: e.target.value })
+              }
             />
           </div>
 
+
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Password {editingId && '(leave blank to keep current)'}
+            <label className="text-[11px] text-base-content/70">
+              Password<span class="text-error">*</span> {editingId && "(leave blank to keep current)"}
             </label>
             <input
               type="password"
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+              className="input input-bordered input-xs w-full h-8 mt-0.5"
               value={formData.password}
-              onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+              onChange={(e) =>
+                setFormData({ ...formData, password: e.target.value })
+              }
               required={!editingId}
             />
           </div>
 
-          <div className="flex justify-end space-x-3 pt-4 border-t border-gray-200">
+
+          <div className="flex justify-end gap-2 pt-2 border-t border-base-300">
+
             <button
               type="button"
               onClick={closeModal}
-              className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
+              className="btn btn-ghost btn-xs h-7"
             >
               Cancel
             </button>
+
             <button
               type="submit"
               disabled={formLoading}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-blue-400 flex items-center"
+              className="btn btn-primary btn-xs h-7"
             >
               {formLoading && (
-                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+                <span className="loading loading-spinner loading-xs mr-1"></span>
               )}
-              {editingId ? 'Update' : 'Create'}
+              {editingId ? "Update" : "Create"}
             </button>
+
           </div>
+
         </form>
+
       </Modal>
+
     </div>
   );
 };

@@ -1,9 +1,18 @@
 import axios from 'axios';
 
+// const API = axios.create({
+//   baseURL: import.meta.env.VITE_API_URL || 'http://localhost:5011/api',
+//   withCredentials: true
+// });
+
 const API = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:5000/api',
+  baseURL: import.meta.env.VITE_API_URL || '/api',
   withCredentials: true
 });
+
+const appBase = (import.meta.env.BASE_URL || '/').replace(/\/+$/, '');
+const loginPath = `${appBase || ''}/login`;
+
 
 // Request interceptor for adding token
 API.interceptors.request.use(
@@ -37,8 +46,8 @@ API.interceptors.response.use(
       localStorage.removeItem('token');
       localStorage.removeItem('user');
       // SPA redirect (avoid full page reload)
-      if (window.location.pathname !== '/login') {
-        window.history.replaceState({}, '', '/login');
+      if (window.location.pathname !== loginPath) {
+        window.history.replaceState({}, '', loginPath);
         window.dispatchEvent(new PopStateEvent('popstate'));
       }
     }

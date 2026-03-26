@@ -15,6 +15,9 @@ const examAttemptSchema = new mongoose.Schema({
     type: Date,
     default: Date.now
   },
+  expiresAt: {
+    type: Date
+  },
   submittedAt: {
     type: Date
   },
@@ -75,6 +78,7 @@ const examAttemptSchema = new mongoose.Schema({
 examAttemptSchema.index({ exam: 1, examinee: 1 }, { unique: true });
 examAttemptSchema.index({ examinee: 1, createdAt: -1 });
 examAttemptSchema.index({ exam: 1, status: 1, createdAt: -1 });
+examAttemptSchema.index({ status: 1, expiresAt: 1 });
 
 // Auto-calculate MCQ scores
 examAttemptSchema.methods.calculateMCQScore = async function () {
@@ -168,11 +172,9 @@ examAttemptSchema.methods.calculateMCQScore = async function () {
     ? (this.totalMarksObtained / this.totalMarksPossible) * 100
     : 0;
 
-  const exam = await mongoose.model('Exam').findById(this.exam);
-  if (exam && exam.totalMarks > 0) {
-    this.percentage = (this.totalMarksObtained / exam.totalMarks) * 100;
-  } else {
-    this.percentage = 0;
+  const exam = await mongoose.model('Exam').findById(this.exam).select('totalMarks');
+  if (exam && Number(exam.totalMarks) > 0) {
+    this.percentage = (this.totalMarksObtained / Number(exam.totalMarks)) * 100;
   }
 };
 

@@ -8,21 +8,49 @@ import { attemptService } from '../../services/attemptService';
 import API from '../../services/api';
 import { examService } from '../../services/examService';
 import { useExamContext } from '../../contexts/ExamContext';
+import { useAlert } from '../../contexts/AlertContext';
 import JSZip from 'jszip';
 
 const Exams = () => {
-  const resolveBackendBase = () => {
-    const apiBase = API.defaults?.baseURL || import.meta.env.VITE_API_URL || '';
-    if (/^https?:\/\//i.test(apiBase)) {
-      return apiBase.replace(/\/api\/?$/, '');
+  const toPlainText = (html) => {
+    const raw = String(html || '');
+    if (typeof window !== 'undefined' && typeof window.DOMParser !== 'undefined') {
+      const doc = new window.DOMParser().parseFromString(raw, 'text/html');
+      return (doc.body.textContent || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
     }
-    return 'http://localhost:5000';
+    return raw.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
   };
-  const backendBase = resolveBackendBase();
-  const toFileUrl = (filePath) => {
-    if (!filePath) return '';
-    if (String(filePath).startsWith('http')) return filePath;
-    return `${backendBase}${filePath}`;
+
+  const toDateTimeLocalValue = (value) => {
+    if (!value) return '';
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return '';
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mi = String(d.getMinutes()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+  };
+
+  const formatExamWindow = (exam) => {
+    const start = exam.startAt ? new Date(exam.startAt) : null;
+    const end = exam.endAt ? new Date(exam.endAt) : null;
+    if (start && end && !Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())) {
+      const formatOptions = {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+      };
+      return `${start.toLocaleString([], formatOptions)} - ${end.toLocaleString([], formatOptions)}`;
+    }
+    if (exam.scheduledDate) {
+      return `${new Date(exam.scheduledDate).toLocaleDateString()} | ${exam.startTime} - ${exam.endTime}`;
+    }
+    return 'Not scheduled';
   };
 
   const {
@@ -56,13 +84,19 @@ const Exams = () => {
   });
   const [examineeFilter, setExamineeFilter] = useState({
     search: '',
-    status: '' // active | inactive
+    status: '', // active | inactive
+    sbu: '',
+    group: ''
   });
 
   const [autoPickExam, setAutoPickExam] = useState(null);
+  const [assignmentMinimumAttemptQuestions, setAssignmentMinimumAttemptQuestions] = useState(0);
+  const [assignmentPassingMarks, setAssignmentPassingMarks] = useState('');
   const [autoPickForm, setAutoPickForm] = useState({
     useSplit: false,
     totalQuestions: '',
+    minimumAttemptQuestions: 0,
+    passingMarks: '',
     mcqCount: '',
     theoryCount: '',
     passageCount: '',
@@ -76,13 +110,9 @@ const Exams = () => {
     title: '',
     description: '',
     duration: 60,
-    scheduledDate: '',
-    startTime: '',
-    endTime: '',
+    startAt: '',
+    endAt: '',
     customInstructionsText: '',
-    instructionPdfFile: null,
-    instructionPdf: '',
-    removeInstructionPdf: false,
     shuffleQuestions: false,
     shuffleOptions: false,
   });
@@ -91,6 +121,11 @@ const Exams = () => {
   const [evaluationMap, setEvaluationMap] = useState({});
   const [evalLoading, setEvalLoading] = useState(false);
   const [evaluatingAttempt, setEvaluatingAttempt] = useState(null);
+  const [showDownloadModal, setShowDownloadModal] = useState(false);
+  const [downloadData, setDownloadData] = useState(null);
+  const [activeTab, setActiveTab] = useState("overview");
+  const [downloadingAll, setDownloadingAll] = useState(false);
+  const [downloadingSingle, setDownloadingSingle] = useState(null);
 
   const toInt = (v) => {
     if (v === '' || v === null || v === undefined) return null;
@@ -101,13 +136,12 @@ const Exams = () => {
   const clamp = (n, min, max) => Math.min(Math.max(n, min), max);
 
   // poolCounts: compute based on selected filters (subjectIds, difficulty, topic)
-  // --- POOL CALCULATIONS ---
   const poolCounts = useMemo(() => {
     const filtered = questions.filter((q) => {
       const sid = String(q.subject?._id || q.subject || '');
       if (autoPickForm.subjectIds.length > 0 && !autoPickForm.subjectIds.includes(sid)) return false;
       if (autoPickForm.difficulty && q.difficulty !== autoPickForm.difficulty) return false;
-      if (autoPickForm.topic && !(q.question || '').toLowerCase().includes(autoPickForm.topic.toLowerCase())) return false;
+      if (autoPickForm.topic && !toPlainText(q.question || '').toLowerCase().includes(autoPickForm.topic.toLowerCase())) return false;
       return true;
     });
     return {
@@ -172,23 +206,10 @@ const Exams = () => {
     });
   };
 
-  const onMcqChange = (value) => {
-    const mcqRaw = toInt(value);
-    const total = toInt(autoPickForm.totalQuestions);
+  const onMcqChange = (v) => {
+    if (!autoPickForm.useSplit) return;
 
-    if (!autoPickForm.useSplit) {
-      // If split is off, ignore / keep empty
-      setAutoPickForm((p) => ({ ...p, mcqCount: '' }));
-      return;
-    }
-
-    if (!total) {
-      alert('Set Total Questions first');
-      return;
-    }
-
-    const mcq = clamp(mcqRaw ?? 0, 0, Math.min(total, poolCounts.mcq));
-    setAutoPickForm((p) => ({ ...p, mcqCount: mcq }));
+    updateSplitTotal(v, autoPickForm.theoryCount, autoPickForm.passageCount);
   };
 
   const openAutoPickModal = (exam) => {
@@ -215,6 +236,8 @@ const Exams = () => {
     setAutoPickForm({
       useSplit: splitFromConfig,
       totalQuestions: rc.totalQuestions ?? '',
+      minimumAttemptQuestions: exam.minimumAttemptQuestions || 0,
+      passingMarks: exam.passingMarks || '',
       mcqCount: rc.mcqCount ?? '',
       theoryCount: rc.theoryCount ?? '',
       passageCount: rc.passageCount ?? '',
@@ -249,6 +272,18 @@ const Exams = () => {
     const total = toInt(autoPickForm.totalQuestions);
     if (!total || total < 1) {
       alert('Total Questions must be >= 1');
+      return;
+    }
+
+    const minimumAttemptQuestions = Number(autoPickForm.minimumAttemptQuestions || 0);
+    const passingMarks = autoPickForm.passingMarks === '' ? 0 : Number(autoPickForm.passingMarks || 0);
+    if (minimumAttemptQuestions > total) {
+      alert('Minimum attempt cannot be more than total questions');
+      return;
+    }
+
+    if (passingMarks < 0) {
+      alert('Passing marks cannot be negative');
       return;
     }
 
@@ -299,6 +334,10 @@ const Exams = () => {
         shuffleSelectedQuestions: !!autoPickForm.shuffleSelectedQuestions,
       };
 
+      await examService.updateExam(autoPickExam._id, {
+        minimumAttemptQuestions,
+        passingMarks
+      });
       const res = await examService.generateRandomQuestions(autoPickExam._id, payload);
 
       alert(res.message || 'Questions generated!');
@@ -329,38 +368,16 @@ const Exams = () => {
     return 'none';
   };
 
-  const onTheoryChange = (value) => {
-    const theoryRaw = toInt(value);
-    const total = toInt(autoPickForm.totalQuestions);
+  const onTheoryChange = (v) => {
+    if (!autoPickForm.useSplit) return;
 
-    if (!autoPickForm.useSplit) {
-      setAutoPickForm((p) => ({ ...p, theoryCount: '' }));
-      return;
-    }
-
-    if (!total) {
-      alert('Set Total Questions first');
-      return;
-    }
-
-    const theory = clamp(theoryRaw ?? 0, 0, Math.min(total, poolCounts.theory));
-    setAutoPickForm((p) => ({ ...p, theoryCount: theory }));
+    updateSplitTotal(autoPickForm.mcqCount, v, autoPickForm.passageCount);
   };
 
-  const onPassageChange = (value) => {
-    const passageRaw = toInt(value);
-    const total = toInt(autoPickForm.totalQuestions);
+  const onPassageChange = (v) => {
+    if (!autoPickForm.useSplit) return;
 
-    if (!autoPickForm.useSplit) {
-      setAutoPickForm((p) => ({ ...p, passageCount: '' }));
-      return;
-    }
-    if (!total) {
-      alert('Set Total Questions first');
-      return;
-    }
-    const passage = clamp(passageRaw ?? 0, 0, Math.min(total, poolCounts.passage));
-    setAutoPickForm((p) => ({ ...p, passageCount: passage }));
+    updateSplitTotal(autoPickForm.mcqCount, autoPickForm.theoryCount, v);
   };
 
   const resetForm = () => {
@@ -368,13 +385,9 @@ const Exams = () => {
       title: '',
       description: '',
       duration: 60,
-      scheduledDate: '',
-      startTime: '',
-      endTime: '',
+      startAt: '',
+      endAt: '',
       customInstructionsText: '',
-      instructionPdfFile: null,
-      instructionPdf: '',
-      removeInstructionPdf: false,
       shuffleQuestions: false,
       shuffleOptions: false,
     });
@@ -391,25 +404,73 @@ const Exams = () => {
     resetForm();
   };
 
+  // const handleSubmit = async (e) => {
+  //   e.preventDefault();
+  //   setFormLoading(true);
+
+  //   try {
+  //     if (!formData.startAt || !formData.endAt) {
+  //       alert('Please provide start and end date-time');
+  //       setFormLoading(false);
+  //       return;
+  //     }
+  //     if (new Date(formData.endAt) <= new Date(formData.startAt)) {
+  //       alert('End date-time must be after start date-time');
+  //       setFormLoading(false);
+  //       return;
+  //     }
+
+  //     const examData = new FormData();
+  //     examData.append('title', formData.title || '');
+  //     examData.append('description', formData.description || '');
+  //     examData.append('duration', Number(formData.duration));
+  //     examData.append('startAt', formData.startAt || '');
+  //     examData.append('endAt', formData.endAt || '');
+  //     examData.append('customInstructions', formData.customInstructionsText || '');
+  //     examData.append('shuffleQuestions', String(!!formData.shuffleQuestions));
+  //     examData.append('shuffleOptions', String(!!formData.shuffleOptions));
+
+  //     if (editingId) {
+  //       await examService.updateExam(editingId, examData);
+  //     } else {
+  //       await examService.createExam(examData);
+  //     }
+  //     closeModal();
+  //     refreshAll();
+  //   } catch (error) {
+  //     alert(error.response?.data?.message || 'Operation failed');
+  //   } finally {
+  //     setFormLoading(false);
+  //   }
+  // };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setFormLoading(true);
 
     try {
-      const examData = new FormData();
-      examData.append('title', formData.title || '');
-      examData.append('description', formData.description || '');
-      examData.append('duration', Number(formData.duration));
-      examData.append('scheduledDate', formData.scheduledDate || '');
-      examData.append('startTime', formData.startTime || '');
-      examData.append('endTime', formData.endTime || '');
-      examData.append('customInstructions', formData.customInstructionsText || '');
-      examData.append('shuffleQuestions', String(!!formData.shuffleQuestions));
-      examData.append('shuffleOptions', String(!!formData.shuffleOptions));
-      examData.append('removeInstructionPdf', String(!!formData.removeInstructionPdf));
-      if (formData.instructionPdfFile) {
-        examData.append('instructionPdfFile', formData.instructionPdfFile);
+      if (!formData.startAt || !formData.endAt) {
+        alert('Please provide start and end date-time');
+        setFormLoading(false);
+        return;
       }
+      if (new Date(formData.endAt) <= new Date(formData.startAt)) {
+        alert('End date-time must be after start date-time');
+        setFormLoading(false);
+        return;
+      }
+
+      // ✅ Send a plain object — NOT FormData
+      const examData = {
+        title: formData.title || '',
+        description: formData.description || '',
+        duration: Number(formData.duration),
+        startAt: formData.startAt,
+        endAt: formData.endAt,
+        customInstructions: formData.customInstructionsText || '',
+        shuffleQuestions: !!formData.shuffleQuestions,
+        shuffleOptions: !!formData.shuffleOptions,
+      };
 
       if (editingId) {
         await examService.updateExam(editingId, examData);
@@ -430,16 +491,12 @@ const Exams = () => {
       title: exam.title || '',
       description: exam.description || '',
       duration: exam.duration || 60,
-      scheduledDate: exam.scheduledDate ? exam.scheduledDate.split('T')[0] : '',
-      startTime: exam.startTime || '',
-      endTime: exam.endTime || '',
+      startAt: toDateTimeLocalValue(exam.startAt || (exam.scheduledDate && exam.startTime ? `${exam.scheduledDate.split('T')[0]}T${exam.startTime}` : '')),
+      endAt: toDateTimeLocalValue(exam.endAt || (exam.scheduledDate && exam.endTime ? `${exam.scheduledDate.split('T')[0]}T${exam.endTime}` : '')),
       customInstructionsText: [
         ...(exam.instructions ? String(exam.instructions).split('\n') : []),
         ...(Array.isArray(exam.customInstructions) ? exam.customInstructions : [])
       ].map((x) => String(x).trim()).filter(Boolean).join('\n'),
-      instructionPdfFile: null,
-      instructionPdf: exam.instructionPdf || '',
-      removeInstructionPdf: false,
       shuffleQuestions: !!exam.shuffleQuestions,
       shuffleOptions: !!exam.shuffleOptions,
     });
@@ -471,6 +528,8 @@ const Exams = () => {
     setSelectedExam(exam);
     const assignedQuestionIds = exam.questions?.map(q => q.question?._id || q.question) || [];
     setSelectedQuestions(assignedQuestionIds);
+    setAssignmentMinimumAttemptQuestions(exam.minimumAttemptQuestions || 0);
+    setAssignmentPassingMarks(exam.passingMarks || '');
     setQuestionFilter({ subject: '', type: '', difficulty: '' });
     setShowQuestionsModal(true);
   };
@@ -480,6 +539,7 @@ const Exams = () => {
     setSelectedExam(exam);
     const assignedExamineeIds = exam.assignedTo?.map(e => e._id || e) || [];
     setSelectedExaminees(assignedExamineeIds);
+    setExamineeFilter({ search: '', status: '', sbu: '', group: '' });
     setShowExamineesModal(true);
   };
 
@@ -518,6 +578,7 @@ const Exams = () => {
         ...examDetails,
         resultMap
       });
+      setActiveTab("overview");
 
       setShowViewModal(true);
     } catch (error) {
@@ -552,6 +613,34 @@ const Exams = () => {
   const saveAssignedQuestions = async () => {
     setFormLoading(true);
     try {
+      const minimumAttemptQuestions = Number(assignmentMinimumAttemptQuestions || 0);
+      const passingMarks = assignmentPassingMarks === '' ? 0 : Number(assignmentPassingMarks || 0);
+      const totalAssignedMarks = questions
+        .filter(q => selectedQuestions.includes(q._id))
+        .reduce((sum, q) => sum + (q.credit || 0), 0);
+
+      if (minimumAttemptQuestions > selectedQuestions.length) {
+        alert('Minimum attempt cannot be more than assigned questions');
+        setFormLoading(false);
+        return;
+      }
+
+      if (passingMarks < 0) {
+        alert('Passing marks cannot be negative');
+        setFormLoading(false);
+        return;
+      }
+
+      if (passingMarks > totalAssignedMarks) {
+        alert('Passing marks cannot be more than total assigned marks');
+        setFormLoading(false);
+        return;
+      }
+
+      await examService.updateExam(selectedExam._id, {
+        minimumAttemptQuestions,
+        passingMarks
+      });
       await examService.assignQuestions(selectedExam._id, selectedQuestions);
       alert('Questions assigned successfully!');
       setShowQuestionsModal(false);
@@ -569,11 +658,11 @@ const Exams = () => {
     setFormLoading(true);
     try {
       await examService.assignExaminees(selectedExam._id, selectedExaminees);
-      alert('Examinees assigned successfully!');
+      alert('Users assigned successfully!');
       setShowExamineesModal(false);
       refreshAll();
     } catch (error) {
-      alert(error.response?.data?.message || 'Failed to assign examinees');
+      alert(error.response?.data?.message || 'Failed to assign users');
     } finally {
       setFormLoading(false);
     }
@@ -605,6 +694,8 @@ const Exams = () => {
       const searchMatch =
         !examineeFilter.search ||
         `${ex.firstname} ${ex.lastname}`.toLowerCase().includes(examineeFilter.search.toLowerCase()) ||
+        String(ex.sbu || '').toLowerCase().includes(examineeFilter.search.toLowerCase()) ||
+        String(ex.group || '').toLowerCase().includes(examineeFilter.search.toLowerCase()) ||
         ex.username.toLowerCase().includes(examineeFilter.search.toLowerCase());
 
       // active / inactive filter
@@ -613,10 +704,18 @@ const Exams = () => {
         (examineeFilter.status === 'active' && ex.isActive) ||
         (examineeFilter.status === 'inactive' && !ex.isActive);
 
-      return searchMatch && statusMatch;
+      const sbuMatch =
+        !examineeFilter.sbu || String(ex.sbu || '') === examineeFilter.sbu;
+
+      const groupMatch =
+        !examineeFilter.group || String(ex.group || '') === examineeFilter.group;
+
+      return searchMatch && statusMatch && sbuMatch && groupMatch;
     });
   };
   const filteredExaminees = getFilteredExaminees();
+  const sbuFilterOptions = [...new Set(examinees.map((ex) => String(ex.sbu || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const groupFilterOptions = [...new Set(examinees.map((ex) => String(ex.group || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
 
   // Get unique subjects from questions for filter dropdown
   const getUniqueSubjects = () => {
@@ -638,48 +737,97 @@ const Exams = () => {
 
   const downloadResults = async (examId, examTitle) => {
     try {
-      // Fetch attempts (results)
       const res = await API.get(`/attempts/exam/${examId}`);
       const attempts = res.data.attempts || [];
 
-      if (attempts.length === 0) {
-        alert('No students have taken this exam yet.');
-        return;
-      }
-
-      // Get full exam details for total marks
       const examRes = await API.get(`/exams/${examId}`);
       const exam = examRes.data.exam;
+      setSelectedExam(exam);
+
+      const attemptByExamineeId = new Map();
+      attempts.forEach((attempt) => {
+        const id = String(attempt?.examinee?._id || '');
+        if (!id) return;
+        const existing = attemptByExamineeId.get(id);
+        if (!existing) {
+          attemptByExamineeId.set(id, attempt);
+          return;
+        }
+        const existingTime = new Date(existing.submittedAt || existing.updatedAt || 0).getTime();
+        const currentTime = new Date(attempt.submittedAt || attempt.updatedAt || 0).getTime();
+        if (currentTime >= existingTime) {
+          attemptByExamineeId.set(id, attempt);
+        }
+      });
+
+      const assigned = Array.isArray(exam.assignedTo) ? exam.assignedTo : [];
+      const attemptsForTable = assigned.map((examinee) => {
+        const id = String(examinee?._id || '');
+        const matchedAttempt = attemptByExamineeId.get(id);
+        if (matchedAttempt) return matchedAttempt;
+        return {
+          _id: null,
+          status: 'not_attempted',
+          totalMarksObtained: 0,
+          totalMarksPossible: exam.totalMarks || 0,
+          percentage: 0,
+          submittedAt: null,
+          examinee: {
+            _id: examinee._id,
+            firstname: examinee.firstname,
+            lastname: examinee.lastname,
+            username: examinee.username
+          }
+        };
+      });
 
       const safeTitle = examTitle.replace(/[^a-zA-Z0-9]/g, '_');
 
-      // Ask user: PDF or Excel?
-      const wantsPDF = window.confirm(
-        `Found ${attempts.length} results!\n\n✅ Click OK → Download as PDF\n❌ Click Cancel → Download as Excel`
-      );
+      setDownloadData({
+        exam,
+        attempts: attemptsForTable,
+        safeTitle
+      });
 
-      if (wantsPDF) {
-        generatePDF(exam, attempts, safeTitle);
-      } else {
-        generateExcel(exam, attempts, safeTitle);
-      }
+      setShowDownloadModal(true);
+
     } catch (err) {
       console.error(err);
-      alert('Failed to fetch results. Please try again.');
+      alert('Failed to fetch results.');
     }
   };
 
   const generateExcel = (exam, attempts, safeTitle) => {
+    const isPass = (attempt) => {
+      const configuredPassingMarks = Number(exam?.passingMarks || 0);
+      if (configuredPassingMarks > 0) {
+        return Number(attempt?.totalMarksObtained || 0) >= configuredPassingMarks;
+      }
+      return Number(attempt?.percentage || 0) >= 40;
+    };
+
     const data = attempts.map((attempt, index) => ({
       'S.No': index + 1,
-      'Name': `${attempt.examinee.firstname} ${attempt.examinee.lastname}`,
-      'Username': attempt.examinee.username,
+      'Name': `${attempt.examinee?.firstname || ''} ${attempt.examinee?.lastname || ''}`.trim() || '-',
+      'Username': attempt.examinee?.username || '-',
       'Marks Obtained': attempt.totalMarksObtained || 0,
       'Total Marks': exam.totalMarks || 100,
-      'Percentage': attempt.percentage ? attempt.percentage.toFixed(2) + '%' : '0%',
-      'Status': (attempt.percentage || 0) >= (exam.passingMarks || 40) ? 'PASS' : 'FAIL',
+      'Percentage': (attempt.status === 'not_attempted' || attempt.status === 'in-progress' || attempt.status === 'submitted' || attempt.status === 'auto-submitted')
+        ? '-'
+        : attempt.percentage
+            ? attempt.percentage.toFixed(2) + '%'
+            : '0%',
+      'Status': attempt.status === 'not_attempted'
+        ? 'NOT ATTEMPTED'
+        : attempt.status === 'in-progress'
+          ? 'IN PROGRESS'
+          : (attempt.status === 'submitted' || attempt.status === 'auto-submitted')
+          ? 'EVALUATION PENDING'
+          : isPass(attempt)
+            ? 'PASS'
+            : 'FAIL',
       'Time Taken (min)': attempt.timeSpent ? Math.floor(attempt.timeSpent / 60) : 0,
-      'Submitted At': new Date(attempt.submittedAt).toLocaleString()
+      'Submitted At': attempt.submittedAt ? new Date(attempt.submittedAt).toLocaleString() : '-'
     }));
 
     const ws = XLSX.utils.json_to_sheet(data);
@@ -697,6 +845,14 @@ const Exams = () => {
 
   const generatePDF = async (exam, attempts, safeTitle) => {
     try {
+      const isPass = (attempt) => {
+        const configuredPassingMarks = Number(exam?.passingMarks || 0);
+        if (configuredPassingMarks > 0) {
+          return Number(attempt?.totalMarksObtained || 0) >= configuredPassingMarks;
+        }
+        return Number(attempt?.percentage || 0) >= 40;
+      };
+
       // Import jsPDF and autoTable dynamically
       const jsPDF = (await import('jspdf')).default;
       const autoTable = (await import('jspdf-autotable')).default;
@@ -721,14 +877,26 @@ const Exams = () => {
       // Table data
       const rows = attempts.map((a, i) => [
         i + 1,
-        `${a.examinee.firstname} ${a.examinee.lastname}`,
-        a.examinee.username,
+        `${a.examinee?.firstname || ''} ${a.examinee?.lastname || ''}`.trim() || '-',
+        a.examinee?.username || '-',
         a.totalMarksObtained || 0,
         exam.totalMarks || 100,
-        a.percentage ? a.percentage.toFixed(1) + '%' : '0%',
-        (a.percentage || 0) >= (exam.passingMarks || 40) ? 'PASS' : 'FAIL',
+        (a.status === 'not_attempted' || a.status === 'in-progress' || a.status === 'submitted' || a.status === 'auto-submitted')
+          ? '-'
+          : a.percentage
+              ? a.percentage.toFixed(1) + '%'
+              : '0%',
+        a.status === 'not_attempted'
+          ? 'NOT ATTEMPTED'
+          : a.status === 'in-progress'
+            ? 'IN PROGRESS'
+          : (a.status === 'submitted' || a.status === 'auto-submitted')
+            ? 'EVALUATION PENDING'
+            : isPass(a)
+              ? 'PASS'
+              : 'FAIL',
         a.timeSpent ? Math.floor(a.timeSpent / 60) + ' min' : '-',
-        new Date(a.submittedAt).toLocaleDateString()
+        a.submittedAt ? new Date(a.submittedAt).toLocaleDateString() : '-'
       ]);
 
       // Apply autoTable correctly
@@ -743,7 +911,7 @@ const Exams = () => {
       });
 
       // Summary
-      const pass = attempts.filter(a => (a.percentage || 0) >= (exam.passingMarks || 40)).length;
+      const pass = attempts.filter((a) => isPass(a)).length;
       doc.setFontSize(12);
       doc.text(`Pass: ${pass} | Fail: ${attempts.length - pass}`, 14, doc.lastAutoTable.finalY + 15);
 
@@ -756,24 +924,28 @@ const Exams = () => {
 
   const handleDownloadPDF = async (attemptId, username, examTitle) => {
     try {
+      setDownloadingSingle(attemptId);
+
       const res = await API.get(`/attempts/${attemptId}/pdf`, {
-        responseType: 'blob'
+        responseType: "blob"
       });
 
-      const blob = new Blob([res.data], { type: 'application/pdf' });
+      const blob = new Blob([res.data], { type: "application/pdf" });
       const url = window.URL.createObjectURL(blob);
 
-      const a = document.createElement('a');
+      const a = document.createElement("a");
       a.href = url;
-      a.download = `${username}_${examTitle}_result.pdf`.replace(/\s+/g, '_');
+      a.download = `${username}_${examTitle}_result.pdf`.replace(/\s+/g, "_");
       document.body.appendChild(a);
       a.click();
       a.remove();
 
       window.URL.revokeObjectURL(url);
     } catch (err) {
-      alert('Failed to download PDF');
+      alert("Failed to download PDF");
       console.error(err);
+    } finally {
+      setDownloadingSingle(null);
     }
   };
 
@@ -815,39 +987,58 @@ const Exams = () => {
   };
 
   const handleDownloadAllPDFs = async () => {
-    if (!selectedExam?.resultMap) return;
-    const evaluated = Object.values(selectedExam.resultMap).filter(
-      (r) => r.status === 'evaluated' && r.attemptId
-    );
-    if (evaluated.length === 0) {
-      alert('No evaluated attempts available for PDF download.');
-      return;
-    }
+    if (!downloadData?.attempts?.length) return;
 
-    const zip = new JSZip();
+    try {
+      setDownloadingAll(true);
 
-    for (const result of evaluated) {
-      const user = (selectedExam.assignedTo || []).find(
-        (e) => e._id && selectedExam.resultMap[e._id]?.attemptId === result.attemptId
+      const evaluated = (downloadData.attempts || []).filter(
+        (attempt) => attempt.status === "evaluated" && attempt._id
       );
-      const username = user?.username || 'examinee';
-      // Sequential fetch keeps memory predictable
-      const res = await API.get(`/attempts/${result.attemptId}/pdf`, {
-        responseType: 'blob'
-      });
-      const filename = `${username}_${selectedExam.title}_result.pdf`.replace(/\s+/g, '_');
-      zip.file(filename, res.data);
-    }
 
-    const zipBlob = await zip.generateAsync({ type: 'blob' });
-    const url = window.URL.createObjectURL(zipBlob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${selectedExam.title || 'exam'}_results_pdfs.zip`.replace(/\s+/g, '_');
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    window.URL.revokeObjectURL(url);
+      if (evaluated.length === 0) {
+        alert("No evaluated attempts available for PDF download.");
+        return;
+      }
+
+      const zip = new JSZip();
+
+      for (const attempt of evaluated) {
+        const username = attempt.examinee?.username || "examinee";
+
+        const res = await API.get(`/attempts/${attempt._id}/pdf`, {
+          responseType: "blob"
+        });
+
+        const filename = `${username}_${downloadData.exam?.title || "exam"}_result.pdf`.replace(/\s+/g, "_");
+
+        zip.file(filename, res.data);
+      }
+
+      const zipBlob = await zip.generateAsync({ type: "blob" });
+
+      const url = window.URL.createObjectURL(zipBlob);
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${downloadData.exam?.title || "exam"}_results_pdfs.zip`.replace(/\s+/g, "_");
+
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      alert("Failed to download PDFs");
+    } finally {
+      setDownloadingAll(false);
+    }
+  };
+
+  const hasEvaluatedAttempts = (resultMap) => {
+    return Object.values(resultMap || {}).some(
+      (r) => r.status === "evaluated"
+    );
   };
 
   const submitEvaluation = async () => {
@@ -861,6 +1052,26 @@ const Exams = () => {
         return;
       }
 
+      for (const ans of answers) {
+        if (ans.marksObtained < 0) {
+          alert("Marks cannot be negative");
+          return;
+        }
+
+        if (ans.marksObtained > 100) {
+          alert("Marks exceed allowed limit");
+          return;
+        }
+      }
+
+      const confirmed = window.confirm(
+        "After evaluation submission, you cannot change the marks.\n\nDo you want to continue?"
+      );
+
+      if (!confirmed) return;
+
+      setEvalLoading(true);
+
       await attemptService.evaluateTheory(
         evaluatingAttempt._id,
         answers
@@ -870,7 +1081,7 @@ const Exams = () => {
 
       closeEvaluateModal();
 
-      // 🔄 Refresh exam view
+      // Refresh exam view
       openViewModal(selectedExam);
     } catch (err) {
       console.error(err);
@@ -880,24 +1091,104 @@ const Exams = () => {
     }
   };
 
+  const updateSplitTotal = (mcq, theory, passage) => {
+    const total =
+      (Number(mcq) || 0) +
+      (Number(theory) || 0) +
+      (Number(passage) || 0);
+
+    setAutoPickForm((p) => ({
+      ...p,
+      mcqCount: mcq,
+      theoryCount: theory,
+      passageCount: passage,
+      totalQuestions: total
+    }));
+  };
+
+  const [expandedRows, setExpandedRows] = useState({});
+
+  const toggleExpand = (key) => {
+    setExpandedRows((prev) => ({
+      ...prev,
+      [key]: !prev[key]
+    }));
+  };
+
+  const handleReappear = async (attemptId, examineeId) => {
+
+    const confirmed = window.confirm(
+      "This will delete the attempt and allow the user to reappear. Continue?"
+    );
+
+    if (!confirmed) return;
+
+    try {
+
+      await attemptService.deleteAttempt(attemptId);
+
+      alert("Attempt deleted. User can reappear now.");
+
+      setSelectedExam(prev => {
+
+        if (!prev) return prev;
+
+        const newResultMap = { ...(prev.resultMap || {}) };
+
+        delete newResultMap[examineeId];
+
+        return {
+          ...prev,
+          resultMap: newResultMap
+        };
+
+      });
+
+      setDownloadData((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          attempts: (prev.attempts || []).map((a) => {
+            if (a._id !== attemptId) return a;
+            return {
+              ...a,
+              _id: null,
+              status: 'not_attempted',
+              totalMarksObtained: 0,
+              totalMarksPossible: prev.exam?.totalMarks || 0,
+              percentage: 0,
+              submittedAt: null
+            };
+          })
+        };
+      });
+
+    } catch (err) {
+
+      alert(err.response?.data?.message || "Failed to delete attempt");
+
+    }
+
+  };
+
   if (!isReady) return <Loader />;
 
   return (
-    <div className="flex flex-col h-screen bg-gray-100">
+    <div className="flex flex-col h-screen bg-base-200">
       <Navbar />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
-        <main className="flex-1 overflow-y-auto p-6">
+        <main className="flex-1 overflow-y-auto p-3">
           <div className="max-w-7xl mx-auto">
             {/* Header */}
-            <div className="flex flex-col md:flex-row md:items-center md:justify-between mb-6">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between mb-4">
               <div>
-                <h1 className="text-2xl font-bold text-gray-800">Exams</h1>
-                <p className="text-gray-500 mt-1">Create and manage your exams</p>
+                <h1 className="text-2xl font-bold">Exams</h1>
+                <p className="text-base-content/70 mt-1">Create and manage your exams</p>
               </div>
               <button
                 onClick={openCreateModal}
-                className="mt-4 md:mt-0 inline-flex items-center px-4 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 transition-colors"
+                className="btn btn-primary mt-4 md:mt-0"
               >
                 <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
@@ -909,30 +1200,51 @@ const Exams = () => {
             {/* Exam Cards */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               {exams.length === 0 ? (
-                <div className="col-span-full bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center">
+                <div className="col-span-full card bg-base-100 rounded-xl shadow-sm border border-base-300 p-12 text-center">
                   <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
                     <span className="text-3xl">📝</span>
                   </div>
-                  <h3 className="text-lg font-semibold text-gray-800 mb-2">No Exams Found</h3>
-                  <p className="text-gray-500 mb-4">Get started by creating your first exam.</p>
-                  <button onClick={openCreateModal} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
+                  <h3 className="text-lg font-semibold mb-2">No Exams Found</h3>
+                  <p className="text-base-content/70 mb-4">Get started by creating your first exam.</p>
+                  <button onClick={openCreateModal} className="btn btn-primary btn-sm">
                     Create Exam
                   </button>
                 </div>
               ) : (
                 exams.map((exam) => {
                   const mode = getPickMode(exam);
+                  const hasCompletedAttempts = Number(exam.completedUsersCount || 0) > 0;
+                  const totalQuestionCount = (() => {
+                    if (mode === 'custom') {
+                      return Number(exam.questions?.length || 0);
+                    }
 
+                    if (mode === 'any') {
+                      return Number(exam.randomConfig?.totalQuestions || 0);
+                    }
+
+                    if (mode === 'split') {
+                      return Number(
+                        (exam.randomConfig?.mcqCount || 0) +
+                        (exam.randomConfig?.theoryCount || 0) +
+                        (exam.randomConfig?.passageCount || 0)
+                      );
+                    }
+
+                    return 0;
+                  })();
+                  const isMinimumAttemptInvalid =
+                    Number(exam.minimumAttemptQuestions || 0) > totalQuestionCount;
                   return (
-                    <div key={exam._id} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden hover:shadow-md transition-shadow">
+                    <div key={exam._id} className="bg-base-100 rounded-xl shadow-sm border border-base-300 overflow-hidden hover:shadow-md transition-shadow">
                       <div className="p-6">
                         <div className="flex items-start justify-between mb-3">
-                          <h3 className="font-semibold text-gray-800 text-lg">{exam.title}</h3>
+                          <h3 className="font-semibold text-lg">{exam.title}</h3>
                           <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(exam.status)}`}>
                             {exam.status}
                           </span>
                         </div>
-                        <p className="text-gray-500 text-sm mb-4 line-clamp-2">
+                        <p className="text-base-content/70 text-sm mb-4 line-clamp-2">
                           {exam.description || 'No description provided'}
                         </p>
 
@@ -947,23 +1259,7 @@ const Exams = () => {
                             <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
                             </svg>
-                            {(() => {
-                              const mode = getPickMode(exam);
-
-                              if (mode === 'custom') {
-                                return `${exam.questions.length} questions`;
-                              }
-
-                              if (mode === 'any') {
-                                return `${exam.randomConfig?.totalQuestions || 0} questions`;
-                              }
-
-                              if (mode === 'split') {
-                                return `${(exam.randomConfig?.mcqCount || 0) + (exam.randomConfig?.theoryCount || 0)} questions`;
-                              }
-
-                              return '0 questions';
-                            })()}
+                            {`${totalQuestionCount} questions`}
 
                           </div>
                           <div className="flex items-center text-gray-600">
@@ -971,6 +1267,12 @@ const Exams = () => {
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
                             </svg>
                             {exam.assignedTo?.length || 0} assigned
+                          </div>
+                          <div className={`flex items-center ${isMinimumAttemptInvalid ? 'text-red-600 font-medium' : 'text-gray-600'}`}>
+                            <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                            Min attempt: {exam.minimumAttemptQuestions || 0}
                           </div>
                           <div className="flex items-center text-gray-600">
                             <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -981,19 +1283,24 @@ const Exams = () => {
                             )}
 
                           </div>
-                        </div>
-                        <div className="mt-2 text-xs text-emerald-700 bg-emerald-50 px-3 py-1 rounded inline-flex items-center">
-                          Completed: {exam.completedUsersCount || 0}
+                          <div className="flex items-center text-gray-600">
+                            <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+                            </svg>
+
+                            {exam.completedUsersCount || 0} Completed
+
+                          </div>
                         </div>
 
                         {/* Date and Time Info */}
-                        {exam.scheduledDate && (
+                        {(exam.startAt || exam.scheduledDate) && (
                           <div className="mt-4 p-3 bg-gray-50 rounded-lg">
                             <div className="flex items-center text-sm text-gray-600">
                               <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
                               </svg>
-                              {new Date(exam.scheduledDate).toLocaleDateString()} | {exam.startTime} - {exam.endTime}
+                              {formatExamWindow(exam)}
                             </div>
                           </div>
                         )}
@@ -1030,63 +1337,65 @@ const Exams = () => {
 
 
                         <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                          {exam.shuffleQuestions && <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded">Shuffled Q</span>}
+                          {exam.shuffleQuestions && <span className="px-2 py-1 bg-blue-50 text-blue-700 rounded">Shuffled Questions</span>}
                           {exam.shuffleOptions && <span className="px-2 py-1 bg-indigo-50 text-indigo-700 rounded">Shuffled Options</span>}
                         </div>
                       </div>
 
                       {/* Action Buttons */}
-                      <div className="px-6 py-3 bg-gray-50 border-t border-gray-200">
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            onClick={() => openViewModal(exam)}
-                            className="px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-200 rounded-lg transition-colors"
-                          >
-                            👁️ View
-                          </button>
-                          {(exam.completedUsersCount || 0) > 0 && (
-                            <button
-                              onClick={() => downloadResults(exam._id, exam.title)}
-                              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium text-sm transition shadow-md flex items-center gap-2"
-                            >
-                              Download Results
-                            </button>
-                          )}
-                          <button
-                            onClick={() => openQuestionsModal(exam)}
-                            className="px-3 py-1.5 text-sm text-purple-600 hover:bg-purple-50 rounded-lg transition-colors"
-                          >
-                            📝 Questions
-                          </button>
-                          <button
-                            onClick={() => openAutoPickModal(exam)}
-                            disabled={mode === 'custom'}
-                            title={
-                              mode === 'custom'
-                                ? 'This exam uses Custom questions. Remove them to enable Auto Pick.'
-                                : 'Automatically pick questions'
-                            }
-                            className="px-3 py-1.5 text-sm text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
-                          >
-                            🎲 Auto Pick
-                          </button>
-                          <button
-                            onClick={() => openExamineesModal(exam)}
-                            className="px-3 py-1.5 text-sm text-green-600 hover:bg-green-50 rounded-lg transition-colors"
-                          >
-                            👥 Examinees
-                          </button>
+                      <div className="p-1 bg-base-200 border-t border-base-300">
+                        <div className="flex mb-2">
                           <button
                             onClick={() => handleEdit(exam)}
-                            className="px-3 py-1.5 text-sm text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                            className="btn btn-ghost btn-xs"
                           >
-                            ✏️ Edit
+                            Edit Exam
                           </button>
                           <button
                             onClick={() => handleDelete(exam._id)}
-                            className="px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                            className="btn btn-ghost btn-xs btn-error"
                           >
-                            🗑️ Delete
+                            Delete Exam
+                          </button>
+
+                          <div
+                            className={!hasCompletedAttempts ? 'tooltip tooltip-left inline-flex' : 'inline-flex'}
+                            data-tip={!hasCompletedAttempts ? 'No completed attempts yet' : ''}
+                          >
+                            <button
+                              onClick={() => downloadResults(exam._id, exam.title)}
+                              disabled={!hasCompletedAttempts}
+                              className="btn btn-ghost btn-xs"
+                            >
+                              Results
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => openQuestionsModal(exam)}
+                            className="btn btn-ghost btn-xs"
+                          >
+                            Assign Questions
+                          </button>
+                          <div
+                            className={mode === 'custom' ? 'tooltip tooltip-top inline-flex' : 'inline-flex'}
+                            data-tip={mode === 'custom' ? 'Disable custom mode first.' : ''}
+                          >
+                            <button
+                              onClick={() => openAutoPickModal(exam)}
+                              disabled={mode === 'custom'}
+                              className="btn btn-ghost btn-xs"
+                            >
+                              Auto Pick
+                            </button>
+                          </div>
+                          <button
+                            onClick={() => openExamineesModal(exam)}
+                            className="btn btn-ghost btn-xs"
+                          >
+                            Assign Users
                           </button>
                         </div>
                       </div>
@@ -1103,179 +1412,162 @@ const Exams = () => {
       <Modal
         isOpen={showModal}
         onClose={closeModal}
-        title={editingId ? 'Edit Exam' : 'Create Exam'}
+        title={editingId ? "Edit Exam" : "Create Exam"}
         size="medium"
       >
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Title *</label>
-            <input
-              type="text"
-              placeholder="Enter exam title"
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-              value={formData.title}
-              onChange={(e) => setFormData({ ...formData, title: e.target.value })}
-              required
-            />
-          </div>
+        <div className="max-h-[unset] overflow-visible">
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Shuffle Questions */}
-            <label className="flex items-center gap-2 text-sm text-gray-700">
+          <form onSubmit={handleSubmit} className="space-y-2 text-sm">
+
+            {/* Title */}
+            <div>
+              <label className="text-[11px] font-medium text-base-content/70">
+                Title<span className="text-error">*</span>
+              </label>
               <input
-                type="checkbox"
-                className="w-4 h-4"
-                checked={formData.shuffleQuestions}
-                onChange={(e) =>
-                  setFormData((p) => ({ ...p, shuffleQuestions: e.target.checked }))
-                }
+                type="text"
+                placeholder="Exam title"
+                className="input input-bordered input-xs w-full h-8 mt-0.5"
+                value={formData.title}
+                onChange={(e) => setFormData({ ...formData, title: e.target.value })}
+                required
               />
-              Shuffle Questions
-            </label>
+            </div>
 
-            {/* Shuffle Options */}
-            <label className="flex items-center gap-2 text-sm text-gray-700">
-              <input
-                type="checkbox"
-                className="w-4 h-4"
-                checked={formData.shuffleOptions}
-                onChange={(e) =>
-                  setFormData((p) => ({ ...p, shuffleOptions: e.target.checked }))
-                }
-              />
-              Shuffle MCQ Options
-            </label>
-          </div>
+            {/* Duration + Shuffle */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 items-end">
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
-            <textarea
-              placeholder="Enter exam description"
-              rows="3"
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none resize-none"
-              value={formData.description}
-              onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-            />
-          </div>
+              <div>
+                <label className="text-[10px] text-base-content/70 whitespace-nowrap">
+                  Duration<span className="text-error">*</span>
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  className="input input-bordered input-xs w-full h-8 mt-0.5"
+                  value={formData.duration}
+                  onChange={(e) => setFormData({ ...formData, duration: e.target.value })}
+                />
+              </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Extra Instructions (one per line)</label>
-            <textarea
-              placeholder="Line 1&#10;Line 2&#10;Line 3"
-              rows="4"
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none resize-none"
-              value={formData.customInstructionsText}
-              onChange={(e) => setFormData({ ...formData, customInstructionsText: e.target.value })}
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Instruction PDF</label>
-            <input
-              type="file"
-              accept="application/pdf"
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-              onChange={(e) => setFormData({
-                ...formData,
-                instructionPdfFile: e.target.files?.[0] || null,
-                removeInstructionPdf: false
-              })}
-            />
-            {formData.instructionPdf && !formData.instructionPdfFile && (
-              <div className="mt-2 space-y-2">
-                <a
-                  href={toFileUrl(formData.instructionPdf)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-blue-600 hover:underline"
-                >
-                  Current PDF: {formData.instructionPdf.split('/').pop()}
-                </a>
-                {editingId && (
-                  <label className="flex items-center gap-2 text-xs text-red-700">
+              <div className="flex items-center h-[38px] mt-[18px]">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-[10px] text-base-content/70">
+                  <label className="inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap leading-none">
+                    <span>Shuffle Questions</span>
                     <input
                       type="checkbox"
-                      checked={!!formData.removeInstructionPdf}
-                      onChange={(e) => setFormData((p) => ({
-                        ...p,
-                        removeInstructionPdf: e.target.checked,
-                        instructionPdfFile: e.target.checked ? null : p.instructionPdfFile
-                      }))}
+                      className="checkbox checkbox-xs checkbox-primary"
+                      checked={!!formData.shuffleQuestions}
+                      onChange={(e) =>
+                        setFormData((p) => ({
+                          ...p,
+                          shuffleQuestions: e.target.checked
+                        }))
+                      }
                     />
-                    Remove current PDF
                   </label>
-                )}
+
+                  <label className="inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap leading-none">
+                    <span>Shuffle Answers</span>
+                    <input
+                      type="checkbox"
+                      className="checkbox checkbox-xs checkbox-primary"
+                      checked={!!formData.shuffleOptions}
+                      onChange={(e) =>
+                        setFormData((p) => ({
+                          ...p,
+                          shuffleOptions: e.target.checked
+                        }))
+                      }
+                    />
+                  </label>
+                </div>
               </div>
-            )}
-          </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Duration (minutes) *</label>
-              <input
-                type="number"
-                min="1"
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-                value={formData.duration}
-                onChange={(e) => setFormData({ ...formData, duration: e.target.value })}
-                required
-              />
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Date *</label>
-              <input
-                type="date"
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-                value={formData.scheduledDate}
-                onChange={(e) => setFormData({ ...formData, scheduledDate: e.target.value })}
-                required
-              />
-            </div>
-          </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Start Time *</label>
-              <input
-                type="time"
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-                value={formData.startTime}
-                onChange={(e) => setFormData({ ...formData, startTime: e.target.value })}
-                required
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">End Time *</label>
-              <input
-                type="time"
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-                value={formData.endTime}
-                onChange={(e) => setFormData({ ...formData, endTime: e.target.value })}
-                required
-              />
-            </div>
-          </div>
+            {/* Dates */}
+            <div className="grid grid-cols-2 gap-2">
 
-          <div className="flex justify-end space-x-3 pt-4 border-t border-gray-200">
-            <button
-              type="button"
-              onClick={closeModal}
-              className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={formLoading}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-blue-400 flex items-center"
-            >
-              {formLoading && (
-                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-              )}
-              {editingId ? 'Update Exam' : 'Create Exam'}
-            </button>
-          </div>
-        </form>
+              <div>
+                <label className="text-[11px] text-base-content/70">
+                  Start<span className="text-error">*</span>
+                </label>
+                <input
+                  type="datetime-local"
+                  className="input input-bordered input-xs w-full h-8 mt-0.5"
+                  value={formData.startAt}
+                  onChange={(e) => setFormData({ ...formData, startAt: e.target.value })}
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] text-base-content/70">
+                  End<span className="text-error">*</span>
+                </label>
+                <input
+                  type="datetime-local"
+                  className="input input-bordered input-xs w-full h-8 mt-0.5"
+                  value={formData.endAt}
+                  onChange={(e) => setFormData({ ...formData, endAt: e.target.value })}
+                />
+              </div>
+
+            </div>
+
+            {/* Description */}
+            <div>
+              <label className="text-[11px] text-base-content/70">
+                Description
+              </label>
+              <textarea
+                rows="1"
+                className="textarea textarea-bordered textarea-xs w-full mt-0.5"
+                value={formData.description}
+                onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                placeholder='Enter exam description'
+              />
+            </div>
+
+            {/* Instructions */}
+            <div>
+              <label className="text-[11px] text-base-content/70">
+                Instructions
+              </label>
+              <textarea
+                rows="1"
+                className="textarea textarea-bordered textarea-xs w-full mt-0.5"
+                value={formData.customInstructionsText}
+                onChange={(e) => setFormData({ ...formData, customInstructionsText: e.target.value })}
+                placeholder='Line 1\nLine 2\nLine 3'
+              />
+            </div>
+
+            {/* Footer */}
+            <div className="flex justify-end gap-2 pt-2 border-t border-base-300">
+
+              <button
+                type="button"
+                onClick={closeModal}
+                className="btn btn-ghost btn-xs h-7"
+              >
+                Cancel
+              </button>
+
+              <button
+                type="submit"
+                disabled={formLoading}
+                className="btn btn-primary btn-xs h-7"
+              >
+                {formLoading && <span className="loading loading-spinner loading-xs mr-1"></span>}
+                {editingId ? "Update" : "Create"}
+              </button>
+
+            </div>
+
+          </form>
+
+        </div>
       </Modal>
 
       {/* Assign Questions Modal */}
@@ -1288,42 +1580,63 @@ const Exams = () => {
         title={`Assign Questions to "${selectedExam?.title}"`}
         size="large"
       >
-        <div className="space-y-4">
+        <div className="space-y-2">
           {/* Filters */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pb-4 border-b border-gray-200">
-            <select
-              className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-              value={questionFilter.subject}
-              onChange={(e) => setQuestionFilter({ ...questionFilter, subject: e.target.value })}
-            >
-              <option value="">All Subjects</option>
-              {(subjects.length > 0 ? subjects : getUniqueSubjects()).map((subject) => (
-                <option key={subject._id} value={subject._id}>
-                  {subject.name} ({subject.questionCount || subject.count || 0})
-                </option>
-              ))}
-            </select>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-2 items-end pb-2 border-b border-base-300">
 
-            <select
-              className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-              value={questionFilter.type}
-              onChange={(e) => setQuestionFilter({ ...questionFilter, type: e.target.value })}
-            >
-              <option value="">All Types</option>
-              <option value="mcq">MCQ</option>
-              <option value="theory">Theory</option>
-            </select>
+            {/* Subject */}
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] text-base-content/70">Subject</label>
+              <select
+                className="select select-bordered select-xs w-full h-7"
+                value={questionFilter.subject}
+                onChange={(e) =>
+                  setQuestionFilter({ ...questionFilter, subject: e.target.value })
+                }
+              >
+                <option value="">All Subjects</option>
+                {(subjects.length > 0 ? subjects : getUniqueSubjects()).map((subject) => (
+                  <option key={subject._id} value={subject._id}>
+                    {subject.name} ({subject.questionCount || subject.count || 0})
+                  </option>
+                ))}
+              </select>
+            </div>
 
-            <select
-              className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-              value={questionFilter.difficulty}
-              onChange={(e) => setQuestionFilter({ ...questionFilter, difficulty: e.target.value })}
-            >
-              <option value="">All Difficulties</option>
-              <option value="easy">Easy</option>
-              <option value="medium">Medium</option>
-              <option value="hard">Hard</option>
-            </select>
+            {/* Type */}
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] text-base-content/70">Type</label>
+              <select
+                className="select select-bordered select-xs w-full h-7"
+                value={questionFilter.type}
+                onChange={(e) =>
+                  setQuestionFilter({ ...questionFilter, type: e.target.value })
+                }
+              >
+                <option value="">All Types</option>
+                <option value="mcq">MCQ</option>
+                <option value="theory">Theory</option>
+                <option value="passage">Passage</option>
+              </select>
+            </div>
+
+            {/* Difficulty */}
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] text-base-content/70">Difficulty</label>
+              <select
+                className="select select-bordered select-xs w-full h-7"
+                value={questionFilter.difficulty}
+                onChange={(e) =>
+                  setQuestionFilter({ ...questionFilter, difficulty: e.target.value })
+                }
+              >
+                <option value="">All Difficulties</option>
+                <option value="easy">Easy</option>
+                <option value="medium">Medium</option>
+                <option value="hard">Hard</option>
+              </select>
+            </div>
+
           </div>
 
           {/* Header with Select All */}
@@ -1332,7 +1645,7 @@ const Exams = () => {
               <input
                 type="checkbox"
                 id="selectAllQuestions"
-                className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                className="checkbox checkbox-sm checkbox-primary"
                 checked={selectedQuestions.length === getFilteredQuestions().length && getFilteredQuestions().length > 0}
                 onChange={() => {
                   const filteredIds = getFilteredQuestions().map(q => q._id);
@@ -1343,97 +1656,186 @@ const Exams = () => {
                   }
                 }}
               />
-              <label htmlFor="selectAllQuestions" className="ml-2 text-sm font-medium text-gray-700">
+              <label htmlFor="selectAllQuestions" className="ml-2 text-sm font-medium">
                 Select All Filtered ({getFilteredQuestions().length} questions)
               </label>
             </div>
-            <span className="text-sm text-gray-500">
+            <span className="text-sm text-base-content/70">
               {selectedQuestions.length} selected
             </span>
           </div>
 
-          {/* Questions List */}
-          <div className="max-h-96 overflow-y-auto space-y-2">
-            {getFilteredQuestions().length === 0 ? (
-              <div className="text-center py-8 text-gray-500">
-                {questions.length === 0
-                  ? 'No questions available. Create questions first.'
-                  : 'No questions found with selected filters.'}
-              </div>
-            ) : (
-              getFilteredQuestions().map((question) => (
-                <div
-                  key={question._id}
-                  className={`p-4 border rounded-lg cursor-pointer transition-colors ${selectedQuestions.includes(question._id)
-                    ? 'border-blue-500 bg-blue-50'
-                    : 'border-gray-200 hover:border-gray-300'
-                    }`}
-                  onClick={() => toggleQuestionSelection(question._id)}
-                >
-                  <div className="flex items-start">
-                    <input
-                      type="checkbox"
-                      className="w-4 h-4 mt-1 text-blue-600 rounded focus:ring-blue-500"
-                      checked={selectedQuestions.includes(question._id)}
-                      onChange={() => toggleQuestionSelection(question._id)}
-                    />
-                    <div className="ml-3 flex-1">
-                      <p className="text-gray-800">{question.question}</p>
-                      <div className="flex flex-wrap items-center gap-2 mt-2">
-                        <span
-                          className="px-2 py-0.5 rounded text-xs font-medium text-white"
-                          style={{ backgroundColor: question.subject?.color || '#6B7280' }}
-                        >
-                          {question.subject?.name || 'Unknown'}
-                        </span>
-                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${question.type === 'mcq' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
-                          }`}>
-                          {question.type?.toUpperCase()}
-                        </span>
-                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${question.difficulty === 'easy' ? 'bg-green-100 text-green-700' :
-                          question.difficulty === 'medium' ? 'bg-yellow-100 text-yellow-700' :
-                            'bg-red-100 text-red-700'
-                          }`}>
-                          {question.difficulty}
-                        </span>
-                        <span className="text-xs text-gray-500">{question.credit} marks</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ))
-            )}
+          {/* Questions Table */}
+          <div className="border border-base-300 rounded-lg overflow-hidden">
+
+            <div className="max-h-[285px] overflow-y-auto">
+
+              <table className="table table-xs">
+
+                <thead className="sticky top-0 bg-base-200 z-10">
+                  <tr>
+                    <th className="w-10">
+                      {/* <input
+                        type="checkbox"
+                        className="checkbox checkbox-xs checkbox-primary"
+                        checked={
+                          selectedQuestions.length === getFilteredQuestions().length &&
+                          getFilteredQuestions().length > 0
+                        }
+                        onChange={() => {
+                          const filteredIds = getFilteredQuestions().map(q => q._id);
+                          if (selectedQuestions.length === filteredIds.length) {
+                            setSelectedQuestions([]);
+                          } else {
+                            setSelectedQuestions(filteredIds);
+                          }
+                        }}
+                      /> */}
+                    </th>
+
+                    <th className="w-[55%]">Question</th>
+                    <th>Subject</th>
+                    <th>Type</th>
+                    <th className="text-right">Marks</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+
+                  {getFilteredQuestions().length === 0 ? (
+                    <tr>
+                      <td colSpan="5" className="text-center py-6 text-base-content/60">
+                        {questions.length === 0
+                          ? "No questions available"
+                          : "No questions match the filters"}
+                      </td>
+                    </tr>
+                  ) : (
+                    getFilteredQuestions().map((question) => (
+                      <tr
+                        key={question._id}
+                        className={`cursor-pointer hover:bg-base-200 ${selectedQuestions.includes(question._id)
+                          ? "bg-primary/10"
+                          : ""
+                          }`}
+                        onClick={() => toggleQuestionSelection(question._id)}
+                      >
+                        <td>
+                          <input
+                            type="checkbox"
+                            className="checkbox checkbox-xs checkbox-primary"
+                            checked={selectedQuestions.includes(question._id)}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={() => toggleQuestionSelection(question._id)}
+                          />
+                        </td>
+
+                        <td>
+                          <div
+                            className="exam-image line-clamp-2 max-w-[500px]"
+                            dangerouslySetInnerHTML={{ __html: question.question }}
+                          />
+                        </td>
+
+                        <td>
+                          <span
+                            className="px-2 py-0.5 rounded text-[11px] text-white"
+                            style={{
+                              backgroundColor: question.subject?.color || "#6B7280"
+                            }}
+                          >
+                            {question.subject?.name || "Unknown"}
+                          </span>
+                        </td>
+
+                        <td>
+                          <span
+                            className={`badge badge-xs ${question.type === "mcq"
+                              ? "badge-info"
+                              : question.type === "theory"
+                                ? "badge-secondary"
+                                : "badge-accent"
+                              }`}
+                          >
+                            {question.type}
+                          </span>
+                        </td>
+
+                        <td className="text-right font-medium">
+                          {question.credit || 0}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+
+                </tbody>
+              </table>
+
+            </div>
+
           </div>
 
           {/* Footer */}
-          <div className="flex justify-between items-center pt-4 border-t border-gray-200">
-            <div className="text-sm text-gray-600">
+          <div className="flex flex-col gap-3 md:flex-row md:justify-between md:items-end pt-4 border-t border-base-300">
+            <div className="text-sm text-base-content/70">
               Total Marks: <span className="font-semibold">
                 {questions
                   .filter(q => selectedQuestions.includes(q._id))
                   .reduce((sum, q) => sum + (q.credit || 0), 0)}
               </span>
             </div>
-            <div className="flex space-x-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 w-full md:w-auto">
+              <div className="flex flex-col gap-1 w-full md:w-56">
+                <label className="text-[11px] text-base-content/70">
+                  Minimum Attempt Questions ({selectedQuestions.length})
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  max={selectedQuestions.length}
+                  className="input input-bordered input-xs w-full h-7"
+                  value={assignmentMinimumAttemptQuestions}
+                  onChange={(e) =>
+                    setAssignmentMinimumAttemptQuestions(
+                      Math.max(0, Number(e.target.value) || 0)
+                    )
+                  }
+                />
+              </div>
+              <div className="flex flex-col gap-1 w-full md:w-40">
+                <label className="text-[11px] text-base-content/70">
+                  Passing Marks
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  className="input input-bordered input-xs w-full h-7"
+                  value={assignmentPassingMarks}
+                  onChange={(e) => setAssignmentPassingMarks(e.target.value)}
+                  placeholder="Default 40%"
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-3">
               <button
                 type="button"
                 onClick={() => {
                   setShowQuestionsModal(false);
                   setQuestionFilter({ subject: '', type: '', difficulty: '' });
                 }}
-                className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
+                className="btn btn-ghost btn-sm"
               >
                 Cancel
               </button>
               <button
                 onClick={saveAssignedQuestions}
                 disabled={formLoading}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-blue-400 flex items-center"
+                className="btn btn-primary btn-sm"
               >
                 {formLoading && (
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+                  <span className="loading loading-spinner loading-xs mr-2"></span>
                 )}
-                Save ({selectedQuestions.length} Questions)
+                Assign ({selectedQuestions.length} Questions)
               </button>
             </div>
           </div>
@@ -1445,47 +1847,86 @@ const Exams = () => {
         isOpen={showExamineesModal}
         onClose={() => {
           setShowExamineesModal(false);
-          setExamineeFilter({ search: '', status: '' });
+          setExamineeFilter({ search: '', status: '', sbu: '', group: '' });
         }}
-        title={`Assign Examinees to "${selectedExam?.title}"`}
+        title={`Assign Users to "${selectedExam?.title}"`}
         size="large"
       >
         {/* Filters */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pb-4 border-b border-gray-200">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-2 pb-2 border-b border-base-300">
 
           {/* Search */}
-          <input
-            type="text"
-            placeholder="Search by name or username"
-            value={examineeFilter.search}
-            onChange={(e) =>
-              setExamineeFilter({ ...examineeFilter, search: e.target.value })
-            }
-            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 outline-none"
-          />
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-base-content/70">Search</label>
+            <input
+              type="text"
+              placeholder="Name, username, SBU or group"
+              value={examineeFilter.search}
+              onChange={(e) =>
+                setExamineeFilter({ ...examineeFilter, search: e.target.value })
+              }
+              className="input input-bordered input-xs w-full h-7"
+            />
+          </div>
 
           {/* Status */}
-          <select
-            value={examineeFilter.status}
-            onChange={(e) =>
-              setExamineeFilter({ ...examineeFilter, status: e.target.value })
-            }
-            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 outline-none"
-          >
-            <option value="">All Status</option>
-            <option value="active">Active</option>
-            <option value="inactive">Inactive</option>
-          </select>
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-base-content/70">Status</label>
+            <select
+              value={examineeFilter.status}
+              onChange={(e) =>
+                setExamineeFilter({ ...examineeFilter, status: e.target.value })
+              }
+              className="select select-bordered select-xs w-full h-7"
+            >
+              <option value="">All Status</option>
+              <option value="active">Active</option>
+              <option value="inactive">Inactive</option>
+            </select>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-base-content/70">SBU</label>
+            <select
+              value={examineeFilter.sbu}
+              onChange={(e) =>
+                setExamineeFilter({ ...examineeFilter, sbu: e.target.value })
+              }
+              className="select select-bordered select-xs w-full h-7"
+            >
+              <option value="">All SBU</option>
+              {sbuFilterOptions.map((sbu) => (
+                <option key={sbu} value={sbu}>{sbu}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-base-content/70">Group</label>
+            <select
+              value={examineeFilter.group}
+              onChange={(e) =>
+                setExamineeFilter({ ...examineeFilter, group: e.target.value })
+              }
+              className="select select-bordered select-xs w-full h-7"
+            >
+              <option value="">All Group</option>
+              {groupFilterOptions.map((group) => (
+                <option key={group} value={group}>{group}</option>
+              ))}
+            </select>
+          </div>
+
         </div>
 
         <div className="space-y-4">
           {/* Header with Select All */}
-          <div className="flex items-center justify-between pb-4 border-b border-gray-200">
+          <div className="flex items-center justify-between p-2 border-b border-base-300">
             <div className="flex items-center">
               <input
                 type="checkbox"
                 id="selectAllExaminees"
-                className="w-4 h-4 text-green-600 rounded focus:ring-green-500"
+                className="checkbox checkbox-sm checkbox-success"
                 checked={
                   filteredExaminees.length > 0 &&
                   selectedExaminees.length === filteredExaminees.length
@@ -1499,303 +1940,142 @@ const Exams = () => {
                   }
                 }}
               />
-              <label htmlFor="selectAllExaminees" className="ml-2 text-sm font-medium text-gray-700">
-                Select All ({getFilteredExaminees().length} examinees)
+              <label htmlFor="selectAllExaminees" className="ml-2 text-sm font-medium">
+                Select All ({getFilteredExaminees().length} users)
               </label>
             </div>
-            <span className="text-sm text-gray-500">
+            <span className="text-sm text-base-content/70">
               {selectedExaminees.length} selected
             </span>
           </div>
 
-          {/* Examinees List */}
-          <div className="max-h-96 overflow-y-auto space-y-2">
-            {getFilteredExaminees().length === 0 ? (
-              <div className="text-center py-8 text-gray-500">
-                No examinees available. Create examinees first.
-              </div>
-            ) : (
-              getFilteredExaminees().map((examinee) => (
-                <div
-                  key={examinee._id}
-                  className={`p-4 border rounded-lg cursor-pointer transition-colors ${selectedExaminees.includes(examinee._id)
-                    ? 'border-green-500 bg-green-50'
-                    : 'border-gray-200 hover:border-gray-300'
-                    }`}
-                  onClick={() => toggleExamineeSelection(examinee._id)}
-                >
-                  <div className="flex items-center">
-                    <input
-                      type="checkbox"
-                      className="w-4 h-4 text-green-600 rounded focus:ring-green-500"
-                      checked={selectedExaminees.includes(examinee._id)}
-                      onChange={() => toggleExamineeSelection(examinee._id)}
-                    />
-                    <div className="ml-3 flex items-center flex-1">
-                      <div className="w-10 h-10 bg-green-500 rounded-full flex items-center justify-center text-white font-semibold mr-3">
-                        {examinee.firstname?.charAt(0)}{examinee.lastname?.charAt(0)}
-                      </div>
-                      <div>
-                        <p className="font-medium text-gray-800">
+          {/* Examinees Table */}
+          <div className="border border-base-300 rounded-lg overflow-hidden">
+
+            <div className="max-h-[285px] overflow-y-auto">
+
+              <table className="table table-xs">
+
+                <thead className="sticky top-0 bg-base-200 z-10">
+                  <tr>
+
+                    <th className="w-10">
+                      {/* <input
+                        type="checkbox"
+                        className="checkbox checkbox-xs checkbox-success"
+                        checked={
+                          filteredExaminees.length > 0 &&
+                          selectedExaminees.length === filteredExaminees.length
+                        }
+                        onChange={() => {
+                          const filteredIds = filteredExaminees.map(e => e._id);
+                          if (selectedExaminees.length === filteredIds.length) {
+                            setSelectedExaminees([]);
+                          } else {
+                            setSelectedExaminees(filteredIds);
+                          }
+                        }}
+                      /> */}
+                    </th>
+
+                    <th>Name</th>
+                    <th>Username</th>
+                    <th>SBU</th>
+                    <th>Group</th>
+                    <th>Status</th>
+
+                  </tr>
+                </thead>
+
+                <tbody>
+
+                  {filteredExaminees.length === 0 ? (
+                    <tr>
+                      <td colSpan="6" className="text-center py-6 text-base-content/60">
+                        No users found
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredExaminees.map((examinee) => (
+                      <tr
+                        key={examinee._id}
+                        className={`cursor-pointer hover:bg-base-200 ${selectedExaminees.includes(examinee._id)
+                          ? "bg-success/10"
+                          : ""
+                          }`}
+                        onClick={() => toggleExamineeSelection(examinee._id)}
+                      >
+
+                        <td>
+                          <input
+                            type="checkbox"
+                            className="checkbox checkbox-xs checkbox-success"
+                            checked={selectedExaminees.includes(examinee._id)}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={() => toggleExamineeSelection(examinee._id)}
+                          />
+                        </td>
+
+                        <td className="font-medium">
                           {examinee.firstname} {examinee.lastname}
-                        </p>
-                        <p className="text-sm text-gray-500">@{examinee.username}</p>
-                      </div>
-                    </div>
-                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${examinee.isActive ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-                      }`}>
-                      {examinee.isActive ? 'Active' : 'Inactive'}
-                    </span>
-                  </div>
-                </div>
-              ))
-            )}
+                        </td>
+
+                        <td className="text-base-content/70">
+                          @{examinee.username}
+                        </td>
+
+                        <td className="text-base-content/70">
+                          {examinee.sbu || '-'}
+                        </td>
+
+                        <td className="text-base-content/70">
+                          {examinee.group || '-'}
+                        </td>
+
+                        <td>
+                          <span
+                            className={`badge badge-xs ${examinee.isActive
+                              ? "badge-success"
+                              : "badge-error"
+                              }`}
+                          >
+                            {examinee.isActive ? "Active" : "Inactive"}
+                          </span>
+                        </td>
+
+                      </tr>
+                    ))
+                  )}
+
+                </tbody>
+
+              </table>
+
+            </div>
+
           </div>
 
           {/* Footer */}
-          <div className="flex justify-end space-x-3 pt-4 border-t border-gray-200">
+          <div className="flex justify-end space-x-3 pt-4 border-t border-base-300">
             <button
               type="button"
               onClick={() => setShowExamineesModal(false)}
-              className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
+              className="btn btn-ghost btn-sm"
             >
               Cancel
             </button>
             <button
               onClick={saveAssignedExaminees}
               disabled={formLoading}
-              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:bg-green-400 flex items-center"
+              className="btn btn-success btn-sm"
             >
               {formLoading && (
-                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+                <span className="loading loading-spinner loading-xs mr-2"></span>
               )}
-              Assign ({selectedExaminees.length} Examinees)
+              Assign ({selectedExaminees.length} Users)
             </button>
           </div>
         </div>
-      </Modal>
-
-      {/* View Exam Details Modal */}
-      <Modal
-        isOpen={showViewModal}
-        onClose={() => setShowViewModal(false)}
-        title="Exam Details"
-        size="large"
-      >
-        {selectedExam && (
-          <div className="space-y-6">
-            {/* Basic Info */}
-            <div className="flex items-center justify-between">
-              <h3 className="text-xl font-semibold text-gray-800">{selectedExam.title}</h3>
-              <span className={`px-3 py-1 rounded-full text-sm font-medium ${getStatusColor(selectedExam.status)}`}>
-                {selectedExam.status}
-              </span>
-            </div>
-            <p className="text-gray-500">{selectedExam.description || 'No description'}</p>
-
-            {/* Stats Grid */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div className="bg-blue-50 p-4 rounded-lg text-center">
-                <p className="text-2xl font-bold text-blue-600">{selectedExam.duration}</p>
-                <p className="text-sm text-blue-600">Minutes</p>
-              </div>
-              <div className="bg-purple-50 p-4 rounded-lg text-center">
-                <p className="text-2xl font-bold text-purple-600">{selectedExam.questions?.length || 0}</p>
-                <p className="text-sm text-purple-600">Questions</p>
-              </div>
-              <div className="bg-green-50 p-4 rounded-lg text-center">
-                <p className="text-2xl font-bold text-green-600">{selectedExam.assignedTo?.length || 0}</p>
-                <p className="text-sm text-green-600">Examinees</p>
-              </div>
-              <div className="bg-yellow-50 p-4 rounded-lg text-center">
-                <p className="text-2xl font-bold text-yellow-600">{selectedExam.totalMarks || 0}</p>
-                <p className="text-sm text-yellow-600">Total Marks</p>
-              </div>
-            </div>
-
-            {/* Schedule */}
-            <div className="bg-gray-50 p-4 rounded-lg">
-              <h4 className="font-medium text-gray-800 mb-2">Schedule</h4>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
-                <div>
-                  <span className="text-gray-500">Date:</span>
-                  <span className="ml-2 font-medium">
-                    {selectedExam.scheduledDate ? new Date(selectedExam.scheduledDate).toLocaleDateString() : 'Not set'}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-gray-500">Start Time:</span>
-                  <span className="ml-2 font-medium">{selectedExam.startTime || 'Not set'}</span>
-                </div>
-                <div>
-                  <span className="text-gray-500">End Time:</span>
-                  <span className="ml-2 font-medium">{selectedExam.endTime || 'Not set'}</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="bg-gray-50 p-4 rounded-lg">
-              <h4 className="font-medium text-gray-800 mb-2">Instruction PDF</h4>
-              {selectedExam.instructionPdf ? (
-                <a
-                  href={toFileUrl(selectedExam.instructionPdf)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-sm text-blue-600 hover:underline"
-                >
-                  View/Download: {selectedExam.instructionPdf.split('/').pop()}
-                </a>
-              ) : (
-                <p className="text-sm text-gray-500">No PDF uploaded.</p>
-              )}
-            </div>
-
-            {/* Assigned Questions */}
-            <div>
-              <h4 className="font-medium text-gray-800 mb-3">Assigned Questions ({selectedExam.questions?.length || 0})</h4>
-              {selectedExam.questions?.length > 0 ? (
-                <div className="max-h-48 overflow-y-auto space-y-2">
-                  {selectedExam.questions.map((q, index) => (
-                    <div key={index} className="p-3 bg-gray-50 rounded-lg flex justify-between items-center">
-                      <div className="flex-1">
-                        <p className="text-sm text-gray-800 truncate">
-                          {index + 1}. {q.question?.question || 'Question not found'}
-                        </p>
-                        {q.question?.subject && (
-                          <span
-                            className="inline-block mt-1 px-2 py-0.5 rounded text-xs font-medium text-white"
-                            style={{ backgroundColor: q.question.subject?.color || '#6B7280' }}
-                          >
-                            {q.question.subject?.name || 'Unknown'}
-                          </span>
-                        )}
-                      </div>
-                      <span className="ml-4 text-xs text-gray-500">
-                        {q.question?.credit || 0} marks
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-sm text-gray-500">No questions assigned yet.</p>
-              )}
-            </div>
-
-            {/* Assigned Examinees */}
-            <div>
-              <div className="flex items-center justify-between mb-3">
-                <h4 className="font-medium text-gray-800">Assigned Examinees ({selectedExam.assignedTo?.length || 0})</h4>
-                {Object.values(selectedExam.resultMap || {}).some((r) => r.status === 'evaluated') && (
-                  <button
-                    onClick={handleDownloadAllPDFs}
-                    className="px-3 py-1 text-xs bg-purple-600 text-white rounded hover:bg-purple-700"
-                  >
-                    Download All PDFs
-                  </button>
-                )}
-              </div>
-              {selectedExam.assignedTo?.length > 0 ? (
-                <div className="flex flex-wrap gap-2">
-                  <div className="space-y-2">
-                    {selectedExam.assignedTo.map((examinee) => {
-                      const result = selectedExam.resultMap?.[examinee._id];
-
-                      return (
-                        <div
-                          key={examinee._id}
-                          className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"
-                        >
-                          <div>
-                            <p className="font-medium text-gray-800">
-                              {examinee.firstname} {examinee.lastname}
-                            </p>
-                            <p className="text-sm text-gray-500">@{examinee.username}</p>
-                          </div>
-
-                          {!result ? (
-                            <span className="px-3 py-1 text-xs rounded-full bg-gray-200 text-gray-600">
-                              Not Attempted
-                            </span>
-                          ) : (
-                            <div className="flex items-center gap-3">
-
-                              {/* ⏳ Evaluation Pending */}
-                              {result.status === 'submitted' && (
-                                <span className="px-3 py-1 text-xs rounded-full bg-yellow-100 text-yellow-700 font-medium">
-                                  Evaluation Pending
-                                </span>
-                              )}
-
-                              {/* ✅ Evaluated Result */}
-                              {result.status === 'evaluated' && (
-                                <>
-                                  <span className="text-sm font-semibold">
-                                    {result.percentage?.toFixed(1)}%
-                                  </span>
-
-                                  <span
-                                    className={`px-3 py-1 text-xs rounded-full font-medium ${result.percentage >= (selectedExam.passingMarks || 40)
-                                      ? 'bg-green-100 text-green-700'
-                                      : 'bg-red-100 text-red-700'
-                                      }`}
-                                  >
-                                    {result.percentage >= (selectedExam.passingMarks || 40)
-                                      ? 'PASS'
-                                      : 'FAIL'}
-                                  </span>
-                                </>
-                              )}
-
-                              {/* ✅ Evaluate button */}
-                              {result.status === 'submitted' && (
-                                <button
-                                  onClick={() => openEvaluateModal(result.attemptId)}
-                                  className="px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700"
-                                >
-                                  Evaluate
-                                </button>
-                              )}
-
-                              {/* ✅ Download PDF */}
-                              {result.status === 'evaluated' && (
-                                <button
-                                  onClick={() =>
-                                    handleDownloadPDF(
-                                      result.attemptId,
-                                      examinee.username,
-                                      selectedExam.title
-                                    )
-                                  }
-                                  className="px-3 py-1 text-xs bg-indigo-600 text-white rounded hover:bg-indigo-700"
-                                >
-                                  Download PDF
-                                </button>
-                              )}
-                            </div>
-                          )}
-
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                </div>
-              ) : (
-                <p className="text-sm text-gray-500">No examinees assigned yet.</p>
-              )}
-            </div>
-
-            {/* Close Button */}
-            <div className="flex justify-end pt-4 border-t border-gray-200">
-              <button
-                onClick={() => setShowViewModal(false)}
-                className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        )}
       </Modal>
 
       {/* Auto Pick Questions Modal */}
@@ -1805,121 +2085,180 @@ const Exams = () => {
         title={`Auto Pick Questions${autoPickExam?.title ? ` - ${autoPickExam.title}` : ''}`}
         size="large"
       >
-        <div className="space-y-2">
-          <p className="text-sm font-medium text-gray-700">Pick Mode</p>
 
-          <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
-            <input
-              type="radio"
-              name="pickMode"
-              checked={!autoPickForm.useSplit}
-              onChange={() =>
-                setAutoPickForm((p) => ({
-                  ...p,
-                  useSplit: false,
-                  mcqCount: '',
-                  theoryCount: '',
-                  passageCount: '',
-                }))
-              }
-            />
-            <span>Any type (pick random from all questions)</span>
-          </label>
+        <div className="space-y-2 text-sm">
+          {/* Pick Mode */}
+          <div>
+            <label className="text-[11px] font-medium text-base-content/70">
+              Pick Mode
+            </label>
 
-          <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
-            <input
-              type="radio"
-              name="pickMode"
-              checked={autoPickForm.useSplit}
-              onChange={() =>
-                setAutoPickForm((p) => ({
-                  ...p,
-                  useSplit: true,
-                  mcqCount: p.mcqCount === '' ? 0 : p.mcqCount,
-                  theoryCount: p.theoryCount === '' ? 0 : p.theoryCount,
-                  passageCount: p.passageCount === '' ? 0 : p.passageCount,
-                }))
-              }
-            />
-            <span>Split (MCQ + Theory + Passage must equal Total)</span>
-          </label>
+            <div className="flex gap-4 mt-1">
+
+              <label className="flex items-center gap-1 text-xs cursor-pointer">
+                <input
+                  type="radio"
+                  name="pickMode"
+                  className="radio radio-xs radio-primary"
+                  checked={!autoPickForm.useSplit}
+                  onChange={() =>
+                    setAutoPickForm((p) => ({
+                      ...p,
+                      useSplit: false,
+                      mcqCount: "",
+                      theoryCount: "",
+                      passageCount: "",
+                    }))
+                  }
+                />
+                Any type
+              </label>
+
+              <label className="flex items-center gap-1 text-xs cursor-pointer">
+                <input
+                  type="radio"
+                  name="pickMode"
+                  className="radio radio-xs radio-primary"
+                  checked={autoPickForm.useSplit}
+                  onChange={() =>
+                    setAutoPickForm((p) => ({
+                      ...p,
+                      useSplit: true,
+                      mcqCount: p.mcqCount || 0,
+                      theoryCount: p.theoryCount || 0,
+                      passageCount: p.passageCount || 0,
+                    }))
+                  }
+                />
+                Split
+              </label>
+
+            </div>
+          </div>
         </div>
+
         <div className="space-y-4">
           {/* Numbers */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-6 gap-2">
+
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Total Questions</label>
+              <label className="text-[11px] text-base-content/70">Total</label>
               <input
                 type="number"
                 min="1"
                 max={maxTotalAllowed}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500"
+                disabled={autoPickForm.useSplit}
+                className={`input input-bordered input-xs w-full h-8 mt-0.5 ${autoPickForm.useSplit ? "input-disabled" : ""
+                  }`}
                 value={autoPickForm.totalQuestions}
                 onChange={(e) => onTotalChange(e.target.value)}
               />
-              <p className="text-xs text-gray-500 mt-1">
+              <p className="text-xs text-base-content/60 mt-1">
                 Available: {poolCounts.total} (MCQ {poolCounts.mcq}, Theory {poolCounts.theory}, Passage {poolCounts.passage})
+              </p>
+
+            </div>
+
+            <div>
+              <label className="text-[11px] text-base-content/70">Min Attempt</label>
+              <input
+                type="number"
+                min="0"
+                max={totalSelected || maxTotalAllowed || 0}
+                className="input input-bordered input-xs w-full h-8 mt-0.5"
+                value={autoPickForm.minimumAttemptQuestions}
+                onChange={(e) =>
+                  setAutoPickForm((prev) => ({
+                    ...prev,
+                    minimumAttemptQuestions: Math.max(0, Number(e.target.value) || 0)
+                  }))
+                }
+              />
+              <p className="text-xs text-base-content/60 mt-1">
+                Cannot exceed total questions ({totalSelected || 0}).
               </p>
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">MCQ Count</label>
+              <label className="text-[11px] text-base-content/70">Passing Marks</label>
+              <input
+                type="number"
+                min="0"
+                className="input input-bordered input-xs w-full h-8 mt-0.5"
+                value={autoPickForm.passingMarks}
+                onChange={(e) =>
+                  setAutoPickForm((prev) => ({
+                    ...prev,
+                    passingMarks: e.target.value
+                  }))
+                }
+                placeholder="Default 40%"
+              />
+              <p className="text-xs text-base-content/60 mt-1">
+                Keep empty to use default formula.
+              </p>
+            </div>
+
+            <div>
+              <label className="text-[11px] text-base-content/70">MCQ</label>
               <input
                 type="number"
                 min="0"
                 max={maxMcqAllowed}
                 disabled={!autoPickForm.useSplit}
-                className={`w-full px-4 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 ${!autoPickForm.useSplit ? 'bg-gray-100 cursor-not-allowed' : ''
-                  }`}
+                className="input input-bordered input-xs w-full h-8 mt-0.5"
                 value={autoPickForm.mcqCount}
                 onChange={(e) => onMcqChange(e.target.value)}
               />
-              <p className="text-xs text-gray-500 mt-1">
+              <p className="text-xs text-base-content/60 mt-1">
                 Max: {maxMcqAllowed} (pool MCQ: {poolCounts.mcq})
               </p>
+
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Theory Count</label>
+              <label className="text-[11px] text-base-content/70">Theory</label>
               <input
                 type="number"
                 min="0"
                 max={maxTheoryAllowed}
                 disabled={!autoPickForm.useSplit}
-                className={`w-full px-4 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 ${!autoPickForm.useSplit ? 'bg-gray-100 cursor-not-allowed' : ''
-                  }`}
+                className="input input-bordered input-xs w-full h-8 mt-0.5"
                 value={autoPickForm.theoryCount}
                 onChange={(e) => onTheoryChange(e.target.value)}
               />
-              <p className="text-xs text-gray-500 mt-1">
+              <p className="text-xs text-base-content/60 mt-1">
                 Max: {maxTheoryAllowed} (pool Theory: {poolCounts.theory})
               </p>
+
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Passage Count</label>
+              <label className="text-[11px] text-base-content/70">Passage</label>
               <input
                 type="number"
                 min="0"
                 max={maxPassageAllowed}
                 disabled={!autoPickForm.useSplit}
-                className={`w-full px-4 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 ${!autoPickForm.useSplit ? 'bg-gray-100 cursor-not-allowed' : ''
-                  }`}
+                className="input input-bordered input-xs w-full h-8 mt-0.5"
                 value={autoPickForm.passageCount}
                 onChange={(e) => onPassageChange(e.target.value)}
               />
-              <p className="text-xs text-gray-500 mt-1">
+              <p className="text-xs text-base-content/60 mt-1">
                 Max: {maxPassageAllowed} (pool Passage: {poolCounts.passage})
               </p>
+
             </div>
+
           </div>
 
           {/* Filters */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {/* <div className="grid grid-cols-3 gap-2">
+
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Difficulty</label>
+              <label className="text-[11px] text-base-content/70">Difficulty</label>
               <select
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500"
+                className="select select-bordered select-xs w-full h-8 mt-0.5"
                 value={autoPickForm.difficulty}
                 onChange={(e) => setAutoPickForm((p) => ({ ...p, difficulty: e.target.value }))}
               >
@@ -1930,38 +2269,39 @@ const Exams = () => {
               </select>
             </div>
 
-            <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-1">Topic contains</label>
+            <div className="col-span-2">
+              <label className="text-[11px] text-base-content/70">Topic contains</label>
               <input
                 type="text"
-                placeholder="e.g., Arrays, SQL Joins"
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Arrays, SQL..."
+                className="input input-bordered input-xs w-full h-8 mt-0.5"
                 value={autoPickForm.topic}
                 onChange={(e) => setAutoPickForm((p) => ({ ...p, topic: e.target.value }))}
               />
             </div>
-          </div>
+
+          </div> */}
 
           {/* Subjects */}
           <div>
             <div className="flex items-center justify-between">
-              <label className="block text-sm font-medium text-gray-700">Subjects</label>
-              <span className="text-xs text-gray-500">
+              <label className="block text-sm font-medium text-base-content">Subjects</label>
+              <span className="text-xs text-base-content/60">
                 {autoPickForm.subjectIds.length} selected
               </span>
             </div>
 
             {subjects.length === 0 ? (
-              <div className="mt-2 text-sm text-gray-500">
+              <div className="mt-2 text-sm text-base-content/60">
                 No subjects found. Create subjects to filter by subject (optional).
               </div>
             ) : (
-              <div className="mt-2 max-h-40 overflow-y-auto border border-gray-200 rounded-lg p-3 space-y-2">
+              <div className="mt-2 max-h-40 overflow-y-auto border border-base-300 rounded-lg p-3 space-y-2 bg-base-100">
                 {subjects.map((s) => (
-                  <label key={s._id} className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                  <label key={s._id} className="label cursor-pointer justify-start gap-2 py-1">
                     <input
                       type="checkbox"
-                      className="w-4 h-4"
+                      className="checkbox checkbox-sm checkbox-primary"
                       checked={autoPickForm.subjectIds.includes(String(s._id))}
                       onChange={() => toggleSubject(s._id)}
                     />
@@ -1970,7 +2310,7 @@ const Exams = () => {
                       style={{ backgroundColor: s.color || '#6B7280' }}
                     />
                     <span>{s.name}</span>
-                    <span className="text-xs text-gray-400">({s.questionCount ?? 0})</span>
+                    <span className="text-xs text-base-content/50">({s.questionCount ?? 0})</span>
                   </label>
                 ))}
               </div>
@@ -1978,30 +2318,31 @@ const Exams = () => {
           </div>
 
           {/* Shuffle */}
-          <div className="flex items-center gap-2">
+          <label className="flex items-center gap-2 text-xs cursor-pointer">
             <input
               type="checkbox"
-              className="w-4 h-4"
+              className="checkbox checkbox-xs checkbox-primary"
               checked={autoPickForm.shuffleSelectedQuestions}
               onChange={(e) =>
-                setAutoPickForm((p) => ({ ...p, shuffleSelectedQuestions: e.target.checked }))
+                setAutoPickForm((p) => ({
+                  ...p,
+                  shuffleSelectedQuestions: e.target.checked
+                }))
               }
             />
-            <span className="text-sm text-gray-700">Shuffle selected questions</span>
-          </div>
+            Shuffle selected questions
+          </label>
 
-          {/* Info */}
-          <div className="p-3 rounded-lg bg-blue-50 text-blue-700 text-sm">
+          <div role="alert" className="alert alert-info text-xs">
             Tip: If you want any-type random selection, keep split off.
             If you want a fixed split, MCQ + Theory + Passage must equal Total.
           </div>
 
-          {/* Actions */}
-          <div className="flex justify-end gap-3 pt-4 border-t border-gray-200">
+          <div className="flex justify-end gap-3 pt-4 border-t border-base-300">
             <button
               type="button"
               onClick={closeAutoPickModal}
-              className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+              className="btn btn-ghost btn-sm"
             >
               Cancel
             </button>
@@ -2010,10 +2351,10 @@ const Exams = () => {
               type="button"
               onClick={submitAutoPick}
               disabled={formLoading}
-              className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:bg-indigo-300 flex items-center"
+              className="btn btn-primary btn-sm"
             >
               {formLoading && (
-                <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2" />
+                <span className="loading loading-spinner loading-xs mr-2" />
               )}
               Generate & Save
             </button>
@@ -2027,102 +2368,181 @@ const Exams = () => {
         onClose={closeEvaluateModal}
         title="Evaluate Theory Answers"
         size="large"
+        backdropZ="z-[70]"
+        modalZ="z-[80]"
       >
         {evaluatingAttempt ? (
           <div className="space-y-5">
-            {/* Student Info */}
-            <div className="bg-gray-50 p-3 rounded-lg">
-              <p className="font-medium text-gray-800">
+            <div className="bg-base-200 p-2 rounded-lg">
+              <p className="font-medium">
                 {evaluatingAttempt.examinee.firstname}{' '}
                 {evaluatingAttempt.examinee.lastname}
               </p>
-              <p className="text-sm text-gray-500">
+              <p className="text-sm text-base-content/70">
                 @{evaluatingAttempt.examinee.username}
               </p>
             </div>
 
             {/* Theory Questions */}
-            <div className="space-y-4 max-h-[60vh] overflow-y-auto">
-              {[
-                ...evaluatingAttempt.answers
-                  .filter(a => a.question?.type === 'theory')
-                  .map((ans) => ({
-                    key: ans.question._id,
-                    questionId: ans.question._id,
-                    prompt: ans.question.question,
-                    maxMarks: ans.question.credit,
-                    textAnswer: ans.textAnswer || '',
-                    existingMarks: ans.marksObtained ?? ''
-                  })),
-                ...evaluatingAttempt.answers
-                  .filter(a => a.question?.type === 'passage')
-                  .flatMap((ans) =>
-                    (ans.question?.subQuestions || [])
-                      .filter((sq) => sq.type === 'theory')
-                      .map((sq) => {
-                        const resp = (ans.passageResponses || []).find((r) => String(r.subQuestionId) === String(sq._id));
-                        return {
-                          key: `${ans.question._id}-${sq._id}`,
+            <div className="border border-base-300 rounded-lg overflow-hidden">
+
+              <div className="max-h-[285px] overflow-y-auto">
+
+                <table className="table table-xs">
+
+                  <thead className="sticky top-0 bg-base-200 z-10">
+                    <tr>
+                      <th className="w-10">#</th>
+                      <th>Question</th>
+                      <th>Answer</th>
+                      <th className="text-center">Max</th>
+                      <th className="w-24">Marks</th>
+                      {/* <th>Feedback</th> */}
+                    </tr>
+                  </thead>
+
+                  <tbody>
+
+                    {[
+                      ...evaluatingAttempt.answers
+                        .filter(a => a.question?.type === 'theory')
+                        .map((ans) => ({
+                          key: ans.question._id,
                           questionId: ans.question._id,
-                          subQuestionId: sq._id,
-                          prompt: `${ans.question.question} | ${sq.prompt}`,
-                          maxMarks: sq.credit,
-                          textAnswer: resp?.textAnswer || '',
-                          existingMarks: resp?.marksObtained ?? ''
-                        };
-                      })
-                  )
-              ].map((item, index) => (
-                <div key={item.key} className="border border-gray-200 rounded-lg p-4">
-                  <p className="font-medium text-gray-800">
-                    Q{index + 1}. {item.prompt}
-                  </p>
+                          prompt: toPlainText(ans.question.question),
+                          maxMarks: ans.question.credit,
+                          textAnswer: ans.textAnswer || '',
+                          existingMarks: ans.marksObtained ?? ''
+                        })),
 
-                  <p className="text-xs text-gray-500 mt-1">
-                    Max Marks: {item.maxMarks}
-                  </p>
+                      ...evaluatingAttempt.answers
+                        .filter(a => a.question?.type === 'passage')
+                        .flatMap((ans) =>
+                          (ans.question?.subQuestions || [])
+                            .filter((sq) => sq.type === 'theory')
+                            .map((sq) => {
+                              const resp = (ans.passageResponses || []).find(
+                                (r) => String(r.subQuestionId) === String(sq._id)
+                              )
 
-                  <div className="mt-3 bg-gray-100 p-3 rounded text-sm text-gray-700 whitespace-pre-wrap">
-                    {item.textAnswer || 'No answer submitted'}
-                  </div>
+                              return {
+                                key: `${ans.question._id}-${sq._id}`,
+                                questionId: ans.question._id,
+                                subQuestionId: sq._id,
+                                prompt: `${toPlainText(ans.question.question)} | ${toPlainText(sq.prompt)}`,
+                                maxMarks: sq.credit,
+                                textAnswer: resp?.textAnswer || '',
+                                existingMarks: resp?.marksObtained ?? ''
+                              }
+                            })
+                        )
+                    ].map((item, index) => (
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
-                    <input
-                      type="number"
-                      min="0"
-                      max={item.maxMarks}
-                      placeholder={`Marks (0 - ${item.maxMarks})`}
-                      defaultValue={item.existingMarks}
-                      className="px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                      onChange={(e) =>
-                        updateEvaluation(item.questionId, {
-                          ...(item.subQuestionId ? { subQuestionId: item.subQuestionId } : {}),
-                          marksObtained: Number(e.target.value)
-                        })
-                      }
-                    />
+                      <tr key={item.key}>
 
-                    <input
-                      type="text"
-                      placeholder="Feedback (optional)"
-                      className="px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                      onChange={(e) =>
-                        updateEvaluation(item.questionId, {
-                          ...(item.subQuestionId ? { subQuestionId: item.subQuestionId } : {}),
-                          feedback: e.target.value
-                        })
-                      }
-                    />
-                  </div>
-                </div>
-              ))}
+                        <td>{index + 1}</td>
+
+                        <td className="max-w-[280px]">
+                          <div className="text-xs">
+                            <div className={`${expandedRows[item.key] ? '' : 'line-clamp-2'}`}>
+                              {item.prompt}
+                            </div>
+
+                            {item.prompt.length > 120 && (
+                              <button
+                                type="button"
+                                onClick={() => toggleExpand(item.key)}
+                                className="text-primary text-[11px] mt-1 hover:underline"
+                              >
+                                {expandedRows[item.key] ? "Show less" : "Show more"}
+                              </button>
+                            )}
+                          </div>
+                        </td>
+
+                        <td className="max-w-[220px]">
+                          <div className="text-xs text-base-content/80">
+
+                            <div className={`${expandedRows[item.key + "-answer"] ? "" : "line-clamp-2"}`}>
+                              {item.textAnswer || "No answer"}
+                            </div>
+
+                            {item.textAnswer?.length > 120 && (
+                              <button
+                                type="button"
+                                onClick={() => toggleExpand(item.key + "-answer")}
+                                className="text-primary text-[11px] mt-1 hover:underline"
+                              >
+                                {expandedRows[item.key + "-answer"] ? "Show less" : "Show more"}
+                              </button>
+                            )}
+
+                          </div>
+                        </td>
+
+                        <td className="text-center font-medium">
+                          {item.maxMarks}
+                        </td>
+
+                        <td>
+                          <input
+                            type="number"
+                            min="0"
+                            max={item.maxMarks}
+                            defaultValue={item.existingMarks}
+                            className="input input-bordered input-xs w-20"
+                            onChange={(e) => {
+
+                              let value = Number(e.target.value)
+
+                              if (value > item.maxMarks) value = item.maxMarks
+                              if (value < 0) value = 0
+
+                              e.target.value = value
+
+                              updateEvaluation(item.questionId, {
+                                ...(item.subQuestionId
+                                  ? { subQuestionId: item.subQuestionId }
+                                  : {}),
+                                marksObtained: value
+                              })
+
+                            }}
+                          />
+                        </td>
+
+                        {/* <td>
+                          <input
+                            type="text"
+                            placeholder="Feedback"
+                            className="input input-bordered input-xs w-full"
+                            onChange={(e) =>
+                              updateEvaluation(item.questionId, {
+                                ...(item.subQuestionId
+                                  ? { subQuestionId: item.subQuestionId }
+                                  : {}),
+                                feedback: e.target.value
+                              })
+                            }
+                          />
+                        </td> */}
+
+                      </tr>
+
+                    ))}
+
+                  </tbody>
+
+                </table>
+
+              </div>
+
             </div>
 
-            {/* Actions */}
-            <div className="flex justify-end gap-3 pt-4 border-t border-gray-200">
+            <div className="flex justify-end gap-3 pt-4 border-t border-base-300">
               <button
                 onClick={closeEvaluateModal}
-                className="px-4 py-2 border rounded-lg text-gray-700 hover:bg-gray-50"
+                className="btn btn-ghost btn-sm"
               >
                 Cancel
               </button>
@@ -2130,17 +2550,229 @@ const Exams = () => {
               <button
                 onClick={submitEvaluation}
                 disabled={evalLoading}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-blue-400 flex items-center"
+                className="btn btn-primary btn-sm"
               >
                 {evalLoading && (
-                  <span className="w-4 h-4 mr-2 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  <span className="loading loading-spinner loading-xs mr-2" />
                 )}
                 Submit Evaluation
               </button>
             </div>
           </div>
         ) : (
-          <p className="text-gray-500">Loading attempt...</p>
+          <p className="text-base-content/60">Loading attempt...</p>
+        )}
+      </Modal>
+
+      {/* Download Results Modal */}
+      <Modal
+        isOpen={showDownloadModal}
+        onClose={() => setShowDownloadModal(false)}
+        title="Download Results"
+        size="large"
+      >
+        {downloadData && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+              <div className="rounded-lg border border-base-300 bg-base-200 px-3 py-2 text-center">
+                <p className="text-lg font-semibold">{downloadData.attempts?.length || 0}</p>
+                <p className="text-xs text-base-content/70">Assigned Users</p>
+              </div>
+              <div className="rounded-lg border border-base-300 bg-base-200 px-3 py-2 text-center">
+                <p className="text-lg font-semibold">
+                  {downloadData.attempts?.filter((attempt) => attempt.status === 'not_attempted').length || 0}
+                </p>
+                <p className="text-xs text-base-content/70">Not Attempted</p>
+              </div>
+              <div className="rounded-lg border border-base-300 bg-base-200 px-3 py-2 text-center">
+                <p className="text-lg font-semibold">
+                  {downloadData.attempts?.filter((attempt) => attempt.status === 'submitted').length || 0}
+                </p>
+                <p className="text-xs text-base-content/70">Evaluation Pending</p>
+              </div>
+              <div className="rounded-lg border border-base-300 bg-base-200 px-3 py-2 text-center">
+                <p className="text-lg font-semibold">
+                  {downloadData.attempts?.filter((attempt) => attempt.status === 'in-progress').length || 0}
+                </p>
+                <p className="text-xs text-base-content/70">In Progress</p>
+              </div>
+              <div className="rounded-lg border border-base-300 bg-base-200 px-3 py-2 text-center">
+                <p className="text-lg font-semibold">
+                  {downloadData.attempts?.filter((attempt) => attempt.status === 'evaluated').length || 0}
+                </p>
+                <p className="text-xs text-base-content/70">Evaluated</p>
+              </div>
+            </div>
+
+            <div className="border border-base-300 rounded-lg overflow-hidden">
+              <div className="max-h-80 overflow-y-auto">
+                <table className="table table-xs table-zebra">
+                  <thead className="sticky top-0 bg-base-100 z-10">
+                    <tr>
+                      <th>#</th>
+                      <th>Name</th>
+                      <th>Username</th>
+                      <th>Marks</th>
+                      <th>Percentage</th>
+                      <th>Status</th>
+                      <th className="text-center">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {downloadData.attempts?.map((attempt, index) => {
+                      const first = attempt.examinee?.firstname || '';
+                      const last = attempt.examinee?.lastname || '';
+                      const name = `${first} ${last}`.trim() || '-';
+                      const username = attempt.examinee?.username ? `@${attempt.examinee.username}` : '-';
+                      const totalPossible = attempt.totalMarksPossible ?? downloadData.exam?.totalMarks ?? 0;
+                      const totalObtained = Number(attempt.totalMarksObtained ?? 0);
+                      const isNotAttempted = attempt.status === 'not_attempted';
+                      const isInProgress = attempt.status === 'in-progress';
+                      const isPendingEvaluation = attempt.status === 'submitted' || attempt.status === 'auto-submitted';
+                      const marks = isInProgress
+                        ? `${totalObtained}/${totalPossible} (live)`
+                        : isPendingEvaluation
+                        ? `${totalObtained}/${totalPossible} (partial)`
+                        : isNotAttempted
+                          ? '-'
+                          : `${totalObtained}/${totalPossible}`;
+                      const percentage = (isPendingEvaluation || isInProgress)
+                        ? '-'
+                        : isNotAttempted
+                          ? '-'
+                          : `${Number(attempt.percentage || 0).toFixed(1)}%`;
+                      const configuredPassingMarks = Number(downloadData.exam?.passingMarks || 0);
+                      const isPass = configuredPassingMarks > 0
+                        ? Number(attempt.totalMarksObtained || 0) >= configuredPassingMarks
+                        : Number(attempt.percentage || 0) >= 40;
+                      const status = isNotAttempted
+                        ? 'Not Attempted'
+                        : isInProgress
+                          ? 'In Progress'
+                        : isPendingEvaluation
+                          ? 'Evaluation Pending'
+                          : isPass
+                            ? 'PASS'
+                            : 'FAIL';
+
+                      return (
+                        <tr key={attempt._id || index}>
+                          <td>{index + 1}</td>
+                          <td className="font-medium">{name}</td>
+                          <td>{username}</td>
+                          <td>{marks}</td>
+                          <td>{percentage}</td>
+                          <td>
+                            <span
+                              className={`badge badge-sm ${status === 'Not Attempted'
+                                ? 'badge-ghost'
+                                : status === 'In Progress'
+                                  ? 'badge-info'
+                                : status === 'Evaluation Pending'
+                                  ? 'badge-warning'
+                                  : status === 'PASS'
+                                    ? 'badge-success'
+                                    : 'badge-error'
+                                }`}
+                            >
+                              {status}
+                            </span>
+                          </td>
+                          <td>
+                            <div className="flex items-center justify-center gap-2">
+                              {(attempt.status === 'submitted' || attempt.status === 'auto-submitted') && (
+                                <button
+                                  onClick={() => openEvaluateModal(attempt._id)}
+                                  className="btn btn-primary btn-xs"
+                                >
+                                  Evaluate
+                                </button>
+                              )}
+
+                              {attempt.status === 'evaluated' && (
+                                <button
+                                  onClick={() =>
+                                    handleDownloadPDF(
+                                      attempt._id,
+                                      attempt.examinee?.username || 'user',
+                                      downloadData.exam?.title || 'exam'
+                                    )
+                                  }
+                                  disabled={downloadingSingle === attempt._id}
+                                  className="btn btn-info btn-xs"
+                                >
+                                  {downloadingSingle === attempt._id ? 'Downloading...' : 'Download'}
+                                </button>
+                              )}
+
+                              {/* Logic for Re-Exam Button vs Not Attempted Text */}
+                              {isNotAttempted ? (
+                                <span className="badge badge-ghost badge-sm">
+                                  Not Attempted
+                                </span>
+                              ) : (
+                                <button
+                                  onClick={() => handleReappear(attempt._id, attempt.examinee?._id)}
+                                  disabled={!attempt._id}
+                                  className="btn btn-error btn-xs"
+                                >
+                                  Re-Exam
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-3 justify-center">
+              <div
+                className={!downloadData.attempts?.some((a) => a.status === 'evaluated') ? "tooltip tooltip" : ""}
+                data-tip="No evaluated attempts yet"
+              >
+                <button
+                  className="btn btn-accent btn-sm"
+                  onClick={handleDownloadAllPDFs}
+                  disabled={downloadingAll || !downloadData.attempts?.some((a) => a.status === 'evaluated')}
+                >
+                  {downloadingAll ? 'Preparing ZIP...' : `Download all users' Answer PDF`}
+                </button>
+              </div>
+
+              {/* <button
+                className="btn btn-primary btn-sm"
+                onClick={() => {
+                  generatePDF(
+                    downloadData.exam,
+                    downloadData.attempts,
+                    downloadData.safeTitle
+                  );
+                  setShowDownloadModal(false);
+                }}
+              >
+                Download PDF
+              </button> */}
+
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => {
+                  generateExcel(
+                    downloadData.exam,
+                    downloadData.attempts,
+                    downloadData.safeTitle
+                  );
+                  setShowDownloadModal(false);
+                }}
+              >
+                Download Result as Excel
+              </button>
+
+            </div>
+          </div>
         )}
       </Modal>
 

@@ -16,9 +16,15 @@ const applyQuestionOwnerFilter = (req, filter = {}) => {
 // @access  Private (SuperUser)
 exports.getQuestions = async (req, res, next) => {
   try {
-    const { type, subject, difficulty, topic, search } = req.query;
+    const { type, subject, difficulty, topic, search, status } = req.query;
 
-    let filter = applyQuestionOwnerFilter(req, { isActive: true });
+    let filter = applyQuestionOwnerFilter(req, {});
+
+    if (!status || status === 'active') {
+      filter.isActive = true;
+    } else if (status === 'inactive') {
+      filter.isActive = false;
+    }
 
     // Apply filters
     if (type) filter.type = type;
@@ -36,10 +42,11 @@ exports.getQuestions = async (req, res, next) => {
     }
 
     const questions = await Question.find(filter)
+      .select('type question options correctOption credit subject topic difficulty explanation subQuestions passageRef isActive createdAt')
       .populate('subject', 'name code color')
       .populate('passageRef', 'title topic complexity marksLabel')
-      .populate('createdBy', 'firstname lastname username')
-      .sort('-createdAt');
+      .sort('createdAt')
+      .lean();
 
     res.status(200).json({
       success: true,
@@ -197,12 +204,12 @@ exports.updateQuestion = async (req, res, next) => {
     }
 
     // Don't allow changing type after creation
-    if (req.body.type && req.body.type !== question.type) {
-      return res.status(400).json({
-        success: false,
-        message: 'Cannot change question type after creation'
-      });
-    }
+    // if (req.body.type && req.body.type !== question.type) {
+    //   return res.status(400).json({
+    //     success: false,
+    //     message: 'Cannot change question type after creation'
+    //   });
+    // }
 
     // Validate subject if being updated
     if (req.body.subject) {
@@ -307,6 +314,60 @@ exports.deleteQuestion = async (req, res, next) => {
   }
 };
 
+// @desc    Bulk deactivate questions
+// @route   POST /api/questions/bulk-delete
+// @access  Private (Admin/SuperUser)
+exports.bulkDeleteQuestions = async (req, res, next) => {
+  try {
+    const { questionIds } = req.body;
+
+    if (!Array.isArray(questionIds) || questionIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No questions selected'
+      });
+    }
+
+    const filter = applyQuestionOwnerFilter(req, { _id: { $in: questionIds } });
+    const result = await Question.updateMany(filter, { $set: { isActive: false } });
+
+    res.status(200).json({
+      success: true,
+      message: `${result.modifiedCount} questions deactivated`,
+      modifiedCount: result.modifiedCount
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Bulk activate questions
+// @route   POST /api/questions/bulk-activate
+// @access  Private (Admin/SuperUser)
+exports.bulkActivateQuestions = async (req, res, next) => {
+  try {
+    const { questionIds } = req.body;
+
+    if (!Array.isArray(questionIds) || questionIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No questions selected'
+      });
+    }
+
+    const filter = applyQuestionOwnerFilter(req, { _id: { $in: questionIds } });
+    const result = await Question.updateMany(filter, { $set: { isActive: true } });
+
+    res.status(200).json({
+      success: true,
+      message: `${result.modifiedCount} questions activated`,
+      modifiedCount: result.modifiedCount
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // @desc    Bulk create questions from Excel
 // @route   POST /api/questions/bulk-upload
 // @access  Private (SuperUser)
@@ -380,6 +441,9 @@ exports.bulkCreateQuestions = async (req, res, next) => {
     res.status(201).json({
       success: true,
       message: `Successfully created ${createdQuestions.length} questions`,
+      created: createdQuestions.length,
+      skipped: failedQuestions.length,
+      total: parseResult.data.length,
       createdQuestions,
       failedQuestions
     });

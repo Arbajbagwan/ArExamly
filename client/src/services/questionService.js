@@ -26,6 +26,16 @@ export const questionService = {
     return data;
   },
 
+  bulkDeleteQuestions: async (questionIds) => {
+    const { data } = await API.post('/questions/bulk-delete', { questionIds });
+    return data;
+  },
+
+  bulkActivateQuestions: async (questionIds) => {
+    const { data } = await API.post('/questions/bulk-activate', { questionIds });
+    return data;
+  },
+
   bulkUpload: async (file) => {
     const formData = new FormData();
     formData.append('file', file);

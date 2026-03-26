@@ -15,13 +15,19 @@ const examSchema = new mongoose.Schema({
     required: [true, 'Please provide exam duration'],
     min: [1, 'Duration must be at least 1 minute']
   },
+  minimumAttemptQuestions: {
+    type: Number,
+    default: 0,
+    min: [0, 'Minimum attempted questions cannot be negative']
+  },
   totalMarks: {
     type: Number,
     default: 0
   },
   passingMarks: {
     type: Number,
-    default: 0
+    default: 0,
+    min: [0, 'Passing marks cannot be negative']
   },
   instructions: {
     type: String
@@ -34,21 +40,23 @@ const examSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
-  instructionPdf: {
-    type: String,
-    trim: true
+  startAt: {
+    type: Date
+  },
+  endAt: {
+    type: Date
   },
   scheduledDate: {
     type: Date,
-    required: [true, 'Please provide scheduled date']
+    required: false
   },
   startTime: {
     type: String,  // Changed from Date to String (e.g., "09:00")
-    required: [true, 'Please provide start time']
+    required: false
   },
   endTime: {
     type: String,  // Changed from Date to String (e.g., "12:00")
-    required: [true, 'Please provide end time']
+    required: false
   },
   questions: [{
     question: {
@@ -115,6 +123,7 @@ const examSchema = new mongoose.Schema({
 
 // Virtual to get full start datetime
 examSchema.virtual('startDateTime').get(function () {
+  if (this.startAt) return new Date(this.startAt);
   if (this.scheduledDate && this.startTime) {
     const [hours, minutes] = this.startTime.split(':');
     const date = new Date(this.scheduledDate);
@@ -126,6 +135,7 @@ examSchema.virtual('startDateTime').get(function () {
 
 // Virtual to get full end datetime
 examSchema.virtual('endDateTime').get(function () {
+  if (this.endAt) return new Date(this.endAt);
   if (this.scheduledDate && this.endTime) {
     const [hours, minutes] = this.endTime.split(':');
     const date = new Date(this.scheduledDate);
@@ -155,6 +165,40 @@ examSchema.methods.isExamActive = function () {
   return now >= startDateTime && now <= endDateTime;
 };
 
+examSchema.pre('validate', function () {
+  const hasNewWindow = this.startAt && this.endAt;
+  const hasLegacyWindow = this.scheduledDate && this.startTime && this.endTime;
+
+  if (!hasNewWindow && !hasLegacyWindow) {
+    throw new Error('Please provide exam start and end time');
+  }
+
+  const start = hasNewWindow ? new Date(this.startAt) : this.startDateTime;
+  const end = hasNewWindow ? new Date(this.endAt) : this.endDateTime;
+  if (start && end && end <= start) {
+    throw new Error('Exam end time must be after start time');
+  }
+
+  if (this.minimumAttemptQuestions < 0) {
+    throw new Error('Minimum attempted questions cannot be negative');
+  }
+
+  const configuredQuestionCount =
+    this.selectionMode === 'random'
+      ? Number(this.randomConfig?.totalQuestions || 0)
+      : Array.isArray(this.questions)
+        ? this.questions.length
+        : 0;
+
+  if (
+    Number.isFinite(this.minimumAttemptQuestions) &&
+    configuredQuestionCount > 0 &&
+    this.minimumAttemptQuestions > configuredQuestionCount
+  ) {
+    throw new Error('Minimum attempted questions cannot exceed total exam questions');
+  }
+});
+
 // Include virtuals in JSON
 examSchema.set('toJSON', { virtuals: true });
 examSchema.set('toObject', { virtuals: true });
@@ -162,5 +206,7 @@ examSchema.set('toObject', { virtuals: true });
 // Hot-path indexes used during startExam assignment/time checks and dashboard listing.
 examSchema.index({ assignedTo: 1, scheduledDate: 1, status: 1 });
 examSchema.index({ createdBy: 1, scheduledDate: -1 });
+examSchema.index({ assignedTo: 1, startAt: 1, endAt: 1, status: 1 });
+examSchema.index({ createdBy: 1, startAt: -1 });
 
 module.exports = mongoose.model('Exam', examSchema);

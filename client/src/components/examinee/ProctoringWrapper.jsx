@@ -1,63 +1,94 @@
-// frontend/src/components/examinee/ProctoringWrapper.jsx
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from "react";
 
-const ProctoringWrapper = ({ children, onViolation }) => {
-  const [violations, setViolations] = useState([]);
+const ProctoringWrapper = ({ children }) => {
+  const [toasts, setToasts] = useState([]);
+  const pendingViolations = useRef([]);
+
+  const showToast = (message) => {
+    const id = Date.now();
+
+    setToasts((prev) => [...prev, { id, message }]);
+
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 3000);
+  };
 
   useEffect(() => {
-    // Fullscreen enforcement
-    const enterFullscreen = () => {
-      document.documentElement.requestFullscreen();
-    };
-    
-    const handleFullscreenChange = () => {
-      if (!document.fullscreenElement) {
-        logViolation('Exited fullscreen');
-      }
-    };
 
-    // Tab visibility detection
     const handleVisibilityChange = () => {
       if (document.hidden) {
-        logViolation('Switched tab');
+        pendingViolations.current.push("Switched tab");
+      } else {
+        // Show warnings when user returns
+        pendingViolations.current.forEach((msg) => {
+          showToast(`⚠️ ${msg}`);
+        });
+
+        pendingViolations.current = [];
       }
     };
 
-    // Copy prevention
-    const handleCopy = (e) => {
+    const blockCopy = (e) => {
       e.preventDefault();
-      logViolation('Attempted to copy');
+      showToast("⚠️ Copy blocked");
     };
 
-    const logViolation = (type) => {
-      const violation = {
-        type,
-        timestamp: new Date()
-      };
-      setViolations(prev => [...prev, violation]);
-      onViolation(violation);
+    const blockPaste = (e) => {
+      e.preventDefault();
+      showToast("⚠️ Paste blocked");
     };
 
-    enterFullscreen();
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    document.addEventListener('copy', handleCopy);
+    const blockCut = (e) => {
+      e.preventDefault();
+      showToast("⚠️ Cut blocked");
+    };
+
+    const blockContextMenu = (e) => {
+      e.preventDefault();
+      showToast("⚠️ Right click blocked");
+    };
+
+    const handleKeyDown = (e) => {
+      if (e.key === "F12") {
+        e.preventDefault();
+        showToast("⚠️ Developer tools blocked");
+      }
+
+      if (e.ctrlKey && e.shiftKey && ["I", "J", "C"].includes(e.key)) {
+        e.preventDefault();
+        showToast("⚠️ Developer tools blocked");
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    document.addEventListener("copy", blockCopy);
+    document.addEventListener("paste", blockPaste);
+    document.addEventListener("cut", blockCut);
+    document.addEventListener("contextmenu", blockContextMenu);
+    document.addEventListener("keydown", handleKeyDown);
 
     return () => {
-      document.removeEventListener('fullscreenchange', handleFullscreenChange);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      document.removeEventListener('copy', handleCopy);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      document.removeEventListener("copy", blockCopy);
+      document.removeEventListener("paste", blockPaste);
+      document.removeEventListener("cut", blockCut);
+      document.removeEventListener("contextmenu", blockContextMenu);
+      document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [onViolation]);
+  }, []);
 
   return (
     <>
-      {violations.length > 0 && (
-        <div className="fixed top-0 left-0 right-0 bg-red-500 text-white p-2 text-center z-50">
-          ⚠️ Warning: {violations.length} violation(s) detected
-        </div>
-      )}
       {children}
+
+      <div className="toast toast-top toast-center z-[9999]">
+        {toasts.map((toast) => (
+          <div key={toast.id} className="alert alert-error">
+            <span>{toast.message}</span>
+          </div>
+        ))}
+      </div>
     </>
   );
 };

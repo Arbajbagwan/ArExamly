@@ -2,7 +2,7 @@ import http from "k6/http";
 import { check, sleep } from "k6";
 import { Trend } from "k6/metrics";
 
-const BASE_URL = __ENV.BASE_URL || "http://localhost:5000";
+const BASE_URL = __ENV.BASE_URL || "http://localhost:5011";
 const EXAM_ID = __ENV.EXAM_ID || "";
 const USERS_CSV = __ENV.USERS_CSV || "./users.csv";
 const SAVE_DELAY_MS = Number(__ENV.SAVE_DELAY_MS || 100);

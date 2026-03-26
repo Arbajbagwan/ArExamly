@@ -6,6 +6,7 @@ const {
   submitExam,
   getExamAttempts,
   getMyAttempts,
+  deleteAttempt,
   evaluateTheoryAnswers,
   downloadAttemptPDF
 } = require('../controllers/attemptController');
@@ -20,6 +21,8 @@ router.route('/my')
 router.route('/exam/:examId')
   .get(restrictTo('admin', 'superuser'), getExamAttempts);
 
+router.delete('/:attemptId', restrictTo('admin', 'superuser'), deleteAttempt);
+
 router.route('/:examId/start')
   .post(restrictTo('examinee'), startExam);
 
@@ -32,7 +35,7 @@ router.route('/:attemptId/submit')
 router.route('/:attemptId/evaluate')
   .put(restrictTo('admin', 'superuser'), evaluateTheoryAnswers);
 
-router.get('/:attemptId/pdf',restrictTo('admin', 'superuser'),downloadAttemptPDF
+router.get('/:attemptId/pdf', restrictTo('admin', 'superuser'), downloadAttemptPDF
 );
 
 module.exports = router;

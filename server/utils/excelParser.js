@@ -2,60 +2,60 @@ const XLSX = require('xlsx');
 const path = require('path');
 const bcrypt = require('bcryptjs');
 
-exports.parseExamineesExcel = async (filePath) => {
-  try {
-    const workbook = XLSX.readFile(filePath);
-    const sheetName = workbook.SheetNames[0];
-    const worksheet = workbook.Sheets[sheetName];
+// exports.parseExamineesExcel = async (filePath) => {
+//   try {
+//     const workbook = XLSX.readFile(filePath);
+//     const sheetName = workbook.SheetNames[0];
+//     const worksheet = workbook.Sheets[sheetName];
 
-    const data = XLSX.utils.sheet_to_json(worksheet);
+//     const data = XLSX.utils.sheet_to_json(worksheet);
 
-    const requiredColumns = ['firstname', 'lastname', 'username', 'password'];
-    const validatedData = [];
-    const errors = [];
+//     const requiredColumns = ['firstname', 'lastname', 'username', 'password'];
+//     const validatedData = [];
+//     const errors = [];
 
-    for (let index = 0; index < data.length; index++) {
-      const row = data[index];
+//     for (let index = 0; index < data.length; index++) {
+//       const row = data[index];
 
-      const missingFields = requiredColumns.filter(col => !row[col]);
+//       const missingFields = requiredColumns.filter(col => !row[col]);
 
-      if (missingFields.length > 0) {
-        errors.push({
-          row: index + 2,
-          message: `Missing fields: ${missingFields.join(', ')}`
-        });
-        continue;
-      }
+//       if (missingFields.length > 0) {
+//         errors.push({
+//           row: index + 2,
+//           message: `Missing fields: ${missingFields.join(', ')}`
+//         });
+//         continue;
+//       }
 
-      const hashedPassword = await bcrypt.hash(
-        String(row.password).trim(),
-        12
-      );
+//       const hashedPassword = await bcrypt.hash(
+//         String(row.password).trim(),
+//         12
+//       );
 
-      validatedData.push({
-        firstname: String(row.firstname).trim(),
-        lastname: String(row.lastname).trim(),
-        username: String(row.username).trim().toLowerCase(),
-        password: hashedPassword, // ✅ FIXED
-        email: row.email
-          ? String(row.email).trim().toLowerCase()
-          : undefined
-      });
-    }
+//       validatedData.push({
+//         firstname: String(row.firstname).trim(),
+//         lastname: String(row.lastname).trim(),
+//         username: String(row.username).trim().toLowerCase(),
+//         password: hashedPassword, // ✅ FIXED
+//         email: row.email
+//           ? String(row.email).trim().toLowerCase()
+//           : undefined
+//       });
+//     }
 
-    return {
-      success: errors.length === 0,
-      data: validatedData,
-      errors
-    };
-  } catch (error) {
-    return {
-      success: false,
-      data: [],
-      errors: [{ message: `Failed to parse Excel file: ${error.message}` }]
-    };
-  }
-};
+//     return {
+//       success: errors.length === 0,
+//       data: validatedData,
+//       errors
+//     };
+//   } catch (error) {
+//     return {
+//       success: false,
+//       data: [],
+//       errors: [{ message: `Failed to parse Excel file: ${error.message}` }]
+//     };
+//   }
+// };
 
 // stable version of parseQuestionsExcel below
 // exports.parseQuestionsExcel = (filePath) => {
@@ -156,6 +156,73 @@ exports.parseExamineesExcel = async (filePath) => {
 //     };
 //   }
 // };
+
+exports.parseExamineesExcel = async (filePath) => {
+  try {
+    const workbook = XLSX.readFile(filePath);
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+
+    const data = XLSX.utils.sheet_to_json(worksheet);
+
+    const validatedData = [];
+    const errors = [];
+
+    for (let index = 0; index < data.length; index++) {
+      const row = data[index];
+
+      // ✅ Trim values first
+      const firstname = row.firstname ? String(row.firstname).trim() : "";
+      const lastname = row.lastname ? String(row.lastname).trim() : "";
+      const sbu = row.sbu ? String(row.sbu).trim() : "";
+      const group = row.group ? String(row.group).trim() : "";
+      const username = row.username
+        ? String(row.username).trim().toLowerCase()
+        : "";
+      const password = row.password ? String(row.password).trim() : "";
+      const email = row.email ? String(row.email).trim().toLowerCase() : undefined;
+
+      // ✅ Validate after trimming
+      const missingFields = [];
+      if (!firstname) missingFields.push("firstname");
+      if (!username) missingFields.push("username");
+      if (!password) missingFields.push("password");
+
+      if (missingFields.length > 0) {
+        errors.push({
+          row: index + 2,
+          message: `Missing fields: ${missingFields.join(", ")}`
+        });
+        continue;
+      }
+
+      // ✅ Hash trimmed password
+      const hashedPassword = await bcrypt.hash(password, 12);
+
+      validatedData.push({
+        firstname,
+        lastname,
+        sbu,
+        group,
+        username,
+        password: hashedPassword,
+        email
+      });
+    }
+
+    return {
+      success: errors.length === 0,
+      data: validatedData,
+      errors
+    };
+  } catch (error) {
+    return {
+      success: false,
+      data: [],
+      errors: [{ message: `Failed to parse Excel file: ${error.message}` }]
+    };
+  }
+};
 
 exports.parseQuestionsExcel = (filePath) => {
   try {

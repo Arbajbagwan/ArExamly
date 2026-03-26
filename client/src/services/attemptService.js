@@ -26,6 +26,11 @@ export const attemptService = {
     return data;
   },
 
+  deleteAttempt: async (attemptId) => {
+    const { data } = await API.delete(`/attempts/${attemptId}`);
+    return data;
+  },
+
   evaluateTheory: async (attemptId, answers) => {
     const { data } = await API.put(`/attempts/${attemptId}/evaluate`, { answers });
     return data;

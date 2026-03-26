@@ -11,6 +11,8 @@ yarn-error.log*
 # Build output
 client/build
 server/dist
+server/public/
+server/uploads/
 
 # OS / Editor
 .DS_Store

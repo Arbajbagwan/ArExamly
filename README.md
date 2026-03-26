@@ -59,7 +59,7 @@ npm install
 Create `server/.env`:
 ```env
 NODE_ENV=development
-PORT=5000
+PORT=5011
 MONGO_URI=mongodb://127.0.0.1:27017/arexamly
 JWT_SECRET=replace-with-strong-secret
 FRONTEND_URL=http://localhost:5173
@@ -83,7 +83,7 @@ npm install
 
 Create `client/.env` (or copy from `client/.env.example`):
 ```env
-VITE_API_URL=http://localhost:5000/api
+VITE_API_URL=http://localhost:5011/api
 VITE_SESSION_INITIAL_DELAY_MS=1500
 VITE_SESSION_POLL_EXAM_MS=30000
 VITE_SESSION_POLL_IDLE_MS=90000
@@ -143,7 +143,7 @@ Use files in `loadtest/`:
 Quick run:
 ```powershell
 k6 run `
-  -e BASE_URL=http://localhost:5000 `
+  -e BASE_URL=http://localhost:5011 `
   -e EXAM_ID=PUT_REAL_EXAM_ID `
   -e USERS_CSV=.\loadtest\users.csv `
   .\loadtest\k6-exam-flow.js

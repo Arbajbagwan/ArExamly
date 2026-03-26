@@ -24,11 +24,12 @@ import MyResults from './pages/examinee/MyResults';
 import Unauthorized from './pages/Unauthorized';
 import NotFound from './pages/NotFound';
 import ChangePassword from './pages/ChangePassword';
+import HelpPage from './pages/HelpPage';
 import { ExamProvider } from './contexts/ExamContext';
 
 function App() {
   return (
-    <Router>
+    <Router basename={import.meta.env.BASE_URL}>
       <SessionChecker>
         <Routes>
           {/* Public Routes */}
@@ -43,7 +44,10 @@ function App() {
             path="/admin/*"
             element={
               <PrivateRoute allowedRoles={['admin']}>
-                <AdminDashboard />
+                <Routes>
+                  <Route path="dashboard" element={<AdminDashboard />} />
+                  <Route path="help" element={<HelpPage />} />
+                </Routes>
               </PrivateRoute>
             }
           />
@@ -60,6 +64,7 @@ function App() {
                     <Route path="subjects" element={<Subjects />} />
                     <Route path="questions" element={<Questions />} />
                     <Route path="examinees" element={<Examinees />} />
+                    <Route path="help" element={<HelpPage />} />
                   </Routes>
                 </ExamProvider>
               </PrivateRoute>

@@ -1,6 +1,7 @@
 import { useEffect, useCallback } from 'react';
 import { useAuth } from '../../hooks/useAuth';
 import { authService } from '../../services/authService';
+import { useAlert } from '../../contexts/AlertContext';
 
 const parseMs = (value, fallback) => {
     const parsed = Number(value);
@@ -14,15 +15,21 @@ const BACKOFF_STEP_MS = parseMs(import.meta.env.VITE_SESSION_BACKOFF_STEP_MS, 10
 const BACKOFF_MAX_MS = parseMs(import.meta.env.VITE_SESSION_BACKOFF_MAX_MS, 60000);
 const MAX_FAILURES = Math.max(1, parseInt(import.meta.env.VITE_SESSION_MAX_FAILURES || '2', 10));
 
+const isExamRoute = () => {
+    const path = window.location.pathname || '';
+    return path.includes('/examinee/exam/');
+};
+
 const SessionChecker = ({ children }) => {
     const { user, logout } = useAuth();
+    const { showAlert } = useAlert();
 
     const handleInvalidSession = useCallback(() => {
-        // This function can be called to log out the user and show an alert.
-        // It's wrapped in useCallback to be stable.
         logout();
-        alert('You have logged in on another device. This session will be terminated.');
-    }, [logout]);
+        showAlert('You have logged in on another device. This session will be terminated.', {
+            title: 'Session Ended'
+        });
+    }, [logout, showAlert]);
 
     useEffect(() => {
         // If no user or user is not an examinee, do nothing.
@@ -37,6 +44,10 @@ const SessionChecker = ({ children }) => {
         const verifySession = async () => {
             if (stopped || document.visibilityState === 'hidden') {
                 scheduleNext();
+                return;
+            }
+
+            if (!isExamRoute()) {
                 return;
             }
 
@@ -65,9 +76,7 @@ const SessionChecker = ({ children }) => {
         };
 
         const getNextDelay = () => {
-            const path = window.location.pathname || '';
-            const isExamScreen = path.includes('/take-exam') || path.includes('/exam/');
-            const baseDelay = isExamScreen ? EXAM_POLL_MS : IDLE_POLL_MS;
+            const baseDelay = isExamRoute() ? EXAM_POLL_MS : IDLE_POLL_MS;
             const backoff = Math.min(BACKOFF_MAX_MS, failureCount * BACKOFF_STEP_MS);
             return baseDelay + backoff;
         };
@@ -75,12 +84,13 @@ const SessionChecker = ({ children }) => {
         const scheduleNext = () => {
             if (stopped) return;
             clearTimeout(timeoutId);
+            if (!isExamRoute()) return;
             timeoutId = setTimeout(verifySession, getNextDelay());
         };
 
         const onVisibilityChange = () => {
             if (stopped) return;
-            if (document.visibilityState === 'visible') {
+            if (document.visibilityState === 'visible' && isExamRoute()) {
                 clearTimeout(timeoutId);
                 verifySession();
             }

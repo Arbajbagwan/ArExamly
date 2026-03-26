@@ -2,7 +2,21 @@ const ExamAttempt = require('../models/ExamAttempt');
 const Exam = require('../models/Exam');
 const Question = require('../models/Question');
 const PDFDocument = require('pdfkit');
+const puppeteer = require("puppeteer");
 const { getCache, setCache } = require('../utils/cache');
+
+const toPlainText = (value) => {
+  const raw = String(value || '');
+  const withoutTags = raw.replace(/<[^>]*>/g, ' ');
+  const decoded = withoutTags
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'");
+  return decoded.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+};
 
 const combineDateTime = (date, timeString) => {
   const [hours, minutes] = timeString.split(':');
@@ -20,6 +34,19 @@ const shuffleIndices = (n) => {
   return arr; // displayedIndex -> originalIndex
 };
 
+const resolveExamWindow = (exam) => {
+  if (exam.startAt && exam.endAt) {
+    return { startDT: new Date(exam.startAt), endDT: new Date(exam.endAt) };
+  }
+  if (exam.scheduledDate && exam.startTime && exam.endTime) {
+    return {
+      startDT: combineDateTime(exam.scheduledDate, exam.startTime),
+      endDT: combineDateTime(exam.scheduledDate, exam.endTime)
+    };
+  }
+  return { startDT: null, endDT: null };
+};
+
 const shuffleArray = (arr) => {
   const out = [...arr];
   for (let i = out.length - 1; i > 0; i--) {
@@ -28,6 +55,184 @@ const shuffleArray = (arr) => {
   }
   return out;
 };
+
+const resolveAttemptExpiry = (attempt, exam) => {
+  if (attempt?.expiresAt) {
+    const parsed = new Date(attempt.expiresAt);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+
+  if (attempt?.startedAt && exam?.duration) {
+    const started = new Date(attempt.startedAt);
+    if (!Number.isNaN(started.getTime())) {
+      return new Date(started.getTime() + Number(exam.duration || 0) * 60 * 1000);
+    }
+  }
+
+  return null;
+};
+
+const autoSubmitAttemptIfExpired = async (attempt, examMeta) => {
+  if (!attempt || attempt.status !== 'in-progress') return false;
+
+  const expiresAt = resolveAttemptExpiry(attempt, examMeta);
+  if (!expiresAt || Date.now() < expiresAt.getTime()) return false;
+
+  attempt.status = 'auto-submitted';
+  attempt.submittedAt = new Date(expiresAt.getTime());
+  attempt.expiresAt = expiresAt;
+  attempt.timeSpent = Math.max(
+    0,
+    Math.round((expiresAt.getTime() - new Date(attempt.startedAt).getTime()) / 1000)
+  );
+  await attempt.calculateMCQScore();
+  await attempt.save();
+  return true;
+};
+
+const countAttemptedQuestions = (answers = []) => answers.reduce((count, answer) => {
+  if (!answer) return count;
+
+  const hasSelectedOption = typeof answer.selectedOption === 'number';
+  const hasTextAnswer = typeof answer.textAnswer === 'string' && toPlainText(answer.textAnswer) !== '';
+  const hasPassageResponse = Array.isArray(answer.passageResponses) && answer.passageResponses.some((response) =>
+    response && (
+      typeof response.selectedOption === 'number' ||
+      (typeof response.textAnswer === 'string' && toPlainText(response.textAnswer) !== '')
+    )
+  );
+
+  return count + (hasSelectedOption || hasTextAnswer || hasPassageResponse ? 1 : 0);
+}, 0);
+
+function generateHTML(attempt) {
+
+  const questions = attempt.answers.map((ans, i) => {
+    const q = ans.question;
+    let optionsHTML = "";
+
+    if (q.type === "mcq") {
+      optionsHTML = q.options.map((opt, idx) => {
+        const selected = ans.selectedOption === idx;
+        const color = selected ? (ans.isCorrect ? "green" : "red") : "black";
+        return `
+          <div class="option" style="color:${color}">
+            ${String.fromCharCode(65 + idx)}. ${opt}
+            ${selected ? "<b>(Selected)</b>" : ""}
+          </div>
+        `;
+      }).join("");
+    }
+
+    let answerHTML = "";
+    if (q.type === "theory") {
+      answerHTML = `
+        <div class="answer">
+          <b>Answer:</b> ${ans.textAnswer || "-"}
+        </div>
+      `;
+    }
+
+    let passageHTML = "";
+    if (q.type === "passage") {
+      const p = q.passageRef || {};
+      passageHTML = `
+        <div class="answer">
+          <b>Passage:</b>
+          <div>${p.title || ""}</div>
+          <div>${p.text || ""}</div>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="question-block">
+        <div class="question-title">
+          Q${i + 1}. ${q.question}
+        </div>
+        ${optionsHTML}
+        ${answerHTML}
+        ${passageHTML}
+        <div class="marks">
+          Marks: ${ans.marksObtained} / ${q.credit}
+          ${q.type === "mcq" ? `| ${ans.isCorrect ? "Correct" : "Incorrect"}` : ""}
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  return `
+    <html>
+    <head>
+    <style>
+
+      body {
+        font-family: Arial, sans-serif;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+
+      /* ✅ Fix: strip <p> tag margins from rich text editor */
+      p {
+        margin: 0;
+        padding: 0;
+        display: inline;
+      }
+
+      .question-block {
+        margin-bottom: 24px;
+        page-break-inside: avoid;
+        break-inside: avoid;
+      }
+
+      .question-title {
+        font-weight: 600;
+        margin-bottom: 6px;
+      }
+
+      .option {
+        margin-left: 20px;
+        margin-top: 3px;
+      }
+
+      .answer {
+        margin-left: 20px;
+        margin-top: 6px;
+      }
+
+      .marks {
+        margin-left: 20px;
+        margin-top: 6px;
+        font-size: 13px;
+      }
+
+      img {
+        max-width: 350px;
+        display: block;
+        margin-top: 6px;
+        margin-bottom: 6px;
+        page-break-inside: avoid;
+      }
+
+      hr {
+        margin: 15px 0;
+      }
+
+    </style>
+    </head>
+    <body>
+      <h1>${attempt.exam.title}</h1>
+      <div class="header">
+        <div><b>Username:</b> ${attempt.examinee.username}</div>
+        <div><b>Submitted:</b> ${new Date(attempt.submittedAt).toLocaleString()}</div>
+        <div><b>Score:</b> ${attempt.totalMarksObtained} / ${attempt.totalMarksPossible}</div>
+      </div>
+      <hr>
+      ${questions}
+    </body>
+    </html>
+  `;
+}
 
 exports.startExam = async (req, res, next) => {
   try {
@@ -41,7 +246,7 @@ exports.startExam = async (req, res, next) => {
 
     if (!exam) {
       exam = await Exam.findById(examId)
-        .select('title description duration scheduledDate startTime endTime shuffleQuestions shuffleOptions selectionMode randomConfig status createdBy assignedTo questions.question')
+        .select('title description duration minimumAttemptQuestions startAt endAt scheduledDate startTime endTime shuffleQuestions shuffleOptions selectionMode randomConfig status createdBy assignedTo questions.question')
         .lean();
 
       if (!exam) return res.status(404).json({ success: false, message: 'Exam not found' });
@@ -55,8 +260,10 @@ exports.startExam = async (req, res, next) => {
 
     // time check
     const now = new Date();
-    const startDT = combineDateTime(exam.scheduledDate, exam.startTime);
-    const endDT = combineDateTime(exam.scheduledDate, exam.endTime);
+    const { startDT, endDT } = resolveExamWindow(exam);
+    if (!startDT || !endDT) {
+      return res.status(400).json({ success: false, message: 'Exam schedule is not configured correctly' });
+    }
     if (now < startDT) return res.status(400).json({ success: false, message: 'Exam has not started yet' });
     if (now > endDT) return res.status(400).json({ success: false, message: 'Exam has ended' });
 
@@ -72,6 +279,16 @@ exports.startExam = async (req, res, next) => {
 
     if (attempt && attempt.status !== 'in-progress') {
       return res.status(400).json({ success: false, message: 'You have already submitted this exam' });
+    }
+
+    const nowMs = now.getTime();
+    const existingExpiry = resolveAttemptExpiry(attempt, exam);
+    if (attempt && existingExpiry && nowMs >= existingExpiry.getTime()) {
+      const fullAttempt = await ExamAttempt.findById(attempt._id).populate('answers.question');
+      if (fullAttempt) {
+        await autoSubmitAttemptIfExpired(fullAttempt, exam);
+      }
+      return res.status(400).json({ success: false, message: 'Exam time is over' });
     }
 
     let createdNew = false;
@@ -136,9 +353,13 @@ exports.startExam = async (req, res, next) => {
 
       // Create Attempt (idempotent for double-start race)
       try {
+        const startedAt = new Date();
+        const expiresAt = new Date(startedAt.getTime() + Number(exam.duration || 0) * 60 * 1000);
         attempt = await ExamAttempt.create({
           exam: examId,
           examinee: req.user._id,
+          startedAt,
+          expiresAt,
           answers: selectedQuestions.map(q => ({
             question: q._id,
             optionOrder: (exam.shuffleOptions && q.type === 'mcq') ? shuffleIndices(q.options.length) : [],
@@ -161,6 +382,20 @@ exports.startExam = async (req, res, next) => {
       }
 
       createdNew = true;
+    }
+
+    if (attempt && !attempt.expiresAt) {
+      const derivedExpiresAt = resolveAttemptExpiry(attempt, exam);
+      if (derivedExpiresAt) {
+        await ExamAttempt.updateOne(
+          { _id: attempt._id, expiresAt: { $exists: false } },
+          { expiresAt: derivedExpiresAt }
+        );
+        attempt = {
+          ...attempt,
+          expiresAt: derivedExpiresAt
+        };
+      }
     }
 
     // For resume/start retries, cache prepared safe questions per attempt for a short window.
@@ -222,6 +457,9 @@ exports.startExam = async (req, res, next) => {
       title: exam.title,
       description: exam.description,
       duration: exam.duration,
+      minimumAttemptQuestions: exam.minimumAttemptQuestions || 0,
+      startAt: exam.startAt || startDT,
+      endAt: exam.endAt || endDT,
       scheduledDate: exam.scheduledDate,
       startTime: exam.startTime,
       endTime: exam.endTime,
@@ -235,7 +473,9 @@ exports.startExam = async (req, res, next) => {
       success: true,
       message: createdNew ? 'Exam started!' : 'Resuming exam...',
       attempt,
-      exam: safeExam
+      exam: safeExam,
+      serverNow: new Date().toISOString(),
+      expiresAt: attempt.expiresAt || resolveAttemptExpiry(attempt, exam)?.toISOString() || null
     });
 
   } catch (error) {
@@ -259,10 +499,11 @@ exports.saveAnswer = async (req, res, next) => {
     }
 
     const exam = await Exam.findById(attempt.exam);
-    const timeElapsed = (Date.now() - attempt.startedAt) / 1000 / 60;
-    if (timeElapsed > exam.duration) {
+    const expiresAt = resolveAttemptExpiry(attempt, exam);
+    if (expiresAt && Date.now() >= expiresAt.getTime()) {
       attempt.status = 'auto-submitted';
-      attempt.submittedAt = new Date();
+      attempt.submittedAt = new Date(expiresAt.getTime());
+      attempt.expiresAt = expiresAt;
       await attempt.save();
       return res.status(400).json({ success: false, message: 'Time limit exceeded. Exam auto-submitted.' });
     }
@@ -327,6 +568,29 @@ exports.submitExam = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Exam already submitted' });
     }
 
+    const exam = await Exam.findById(attempt.exam).select('duration minimumAttemptQuestions');
+    const expiresAt = resolveAttemptExpiry(attempt, exam);
+    if (expiresAt && Date.now() >= expiresAt.getTime()) {
+      attempt.status = 'auto-submitted';
+      attempt.submittedAt = new Date(expiresAt.getTime());
+      attempt.timeSpent = Math.max(0, Math.round((expiresAt.getTime() - new Date(attempt.startedAt).getTime()) / 1000));
+      attempt.expiresAt = expiresAt;
+      await attempt.calculateMCQScore();
+      await attempt.save();
+      return res.status(400).json({ success: false, message: 'Time limit exceeded. Exam auto-submitted.' });
+    }
+
+    const minimumAttemptQuestions = Number(exam?.minimumAttemptQuestions || 0);
+    const attemptedQuestions = countAttemptedQuestions(attempt.answers || []);
+    if (minimumAttemptQuestions > 0 && attemptedQuestions < minimumAttemptQuestions) {
+      return res.status(400).json({
+        success: false,
+        message: `You must attempt at least ${minimumAttemptQuestions} questions before submitting this exam`,
+        minimumAttemptQuestions,
+        attemptedQuestions
+      });
+    }
+
     attempt.submittedAt = new Date();
     attempt.timeSpent = (attempt.submittedAt - attempt.startedAt) / 1000;
 
@@ -359,9 +623,19 @@ exports.submitExam = async (req, res, next) => {
 // @access  Private (SuperUser)
 exports.getExamAttempts = async (req, res, next) => {
   try {
-    const attempts = await ExamAttempt.find({ exam: req.params.examId })
+    let attempts = await ExamAttempt.find({ exam: req.params.examId })
       .populate('examinee', 'firstname lastname username')
-      .populate('exam', 'title')
+      .populate('exam', 'title duration')
+      .populate('answers.question')
+      .sort('-createdAt');
+
+    for (const attempt of attempts) {
+      await autoSubmitAttemptIfExpired(attempt, { duration: attempt.exam?.duration });
+    }
+
+    attempts = await ExamAttempt.find({ exam: req.params.examId })
+      .populate('examinee', 'firstname lastname username')
+      .populate('exam', 'title duration')
       .populate('answers.question')
       .sort('-createdAt');
 
@@ -380,13 +654,26 @@ exports.getExamAttempts = async (req, res, next) => {
 // @access  Private (Examinee)
 exports.getMyAttempts = async (req, res, next) => {
   try {
-    const attempts = await ExamAttempt.find({ examinee: req.user._id })
-      .populate('exam', 'title totalMarks')
+    let attempts = await ExamAttempt.find({ examinee: req.user._id })
+      .populate('exam', 'title totalMarks duration')
       .populate('examinee', 'username firstname lastname') // ✅ FIX 1
       .populate({
         path: 'answers.question',
         populate: { path: 'passageRef' }
       }) // include passage details
+      .sort('-createdAt');
+
+    for (const attempt of attempts) {
+      await autoSubmitAttemptIfExpired(attempt, { duration: attempt.exam?.duration });
+    }
+
+    attempts = await ExamAttempt.find({ examinee: req.user._id })
+      .populate('exam', 'title totalMarks duration')
+      .populate('examinee', 'username firstname lastname')
+      .populate({
+        path: 'answers.question',
+        populate: { path: 'passageRef' }
+      })
       .sort('-createdAt');
 
     res.status(200).json({
@@ -395,6 +682,34 @@ exports.getMyAttempts = async (req, res, next) => {
     });
   } catch (err) {
     next(err);
+  }
+};
+
+// @desc    Delete exam attempt (allow reappear)
+// @route   DELETE /api/attempts/:attemptId
+// @access  Private (Admin / SuperUser)
+
+exports.deleteAttempt = async (req, res, next) => {
+  try {
+
+    const attempt = await ExamAttempt.findById(req.params.attemptId);
+
+    if (!attempt) {
+      return res.status(404).json({
+        success: false,
+        message: "Attempt not found"
+      });
+    }
+
+    await attempt.deleteOne();
+
+    res.status(200).json({
+      success: true,
+      message: "Attempt deleted successfully"
+    });
+
+  } catch (error) {
+    next(error);
   }
 };
 
@@ -434,6 +749,12 @@ exports.evaluateTheoryAnswers = async (req, res, next) => {
       const q = ans.question;
 
       if (q.type === 'theory') {
+        if (marksObtained < 0 || marksObtained > q.credit) {
+          return res.status(400).json({
+            success: false,
+            message: `Marks must be between 0 and ${q.credit}`
+          });
+        }
         ans.marksObtained = marksObtained;
         ans.feedback = feedback;
         ans.reviewedBy = req.user._id;
@@ -484,107 +805,59 @@ exports.evaluateTheoryAnswers = async (req, res, next) => {
 exports.downloadAttemptPDF = async (req, res) => {
   try {
     const attempt = await ExamAttempt.findById(req.params.attemptId)
-      .populate('exam')
-      .populate('examinee')
+      .populate("exam")
+      .populate("examinee")
       .populate({
-        path: 'answers.question',
-        populate: { path: 'passageRef' }
+        path: "answers.question",
+        populate: { path: "passageRef" }
       });
 
     if (!attempt) {
-      return res.status(404).json({ success: false, message: 'Attempt not found' });
+      return res.status(404).json({
+        success: false,
+        message: "Attempt not found"
+      });
     }
 
-    const filename = `${attempt.examinee.username}_${attempt.exam.title}_result.pdf`
-      .replace(/\s+/g, '_');
+    const html = generateHTML(attempt);
 
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${filename}"`
-    );
-
-    const doc = new PDFDocument({ margin: 40 });
-    doc.pipe(res);
-
-    // ===== HEADER =====
-    doc.fontSize(11).text(`Exam: ${attempt.exam.title}`);
-    doc.moveDown(0.5);
-    doc.fontSize(12).text(`Username: ${attempt.examinee.username}`);
-    doc.text(`Submitted At: ${attempt.submittedAt.toLocaleString()}`);
-    doc.text(
-      `Score: ${attempt.totalMarksObtained} / ${attempt.totalMarksPossible}`
-    );
-
-    doc.moveDown();
-
-    // ===== QUESTIONS =====
-    attempt.answers.forEach((ans, i) => {
-      const q = ans.question;
-
-      doc.fontSize(12).text(`Q${i + 1}. ${q.question}`);
-      doc.moveDown(0.3);
-
-      if (q.type === 'mcq') {
-        q.options.forEach((opt, idx) => {
-          const selected = ans.selectedOption === idx;
-          const marker = selected ? 'Selected' : '   ';
-
-          doc.text(
-            `${String.fromCharCode(65 + idx)}. ${opt} ${marker} `,
-            { indent: 20 }
-          );
-        });
-
-        doc.moveDown(0.3);
-        doc.fontSize(10).text(
-          `Marks: ${ans.marksObtained} / ${q.credit} | ${ans.isCorrect ? 'Correct' : 'Incorrect'}`,
-          { indent: 20 }
-        );
-      } else if (q.type === 'theory') {
-        doc.text(`Answer: ${ans.textAnswer || '-'}`, { indent: 20 });
-        doc.text(`Marks: ${ans.marksObtained} / ${q.credit}`, { indent: 20 });
-      } else if (q.type === 'passage') {
-        if (q.passageRef?.title) {
-          doc.fontSize(11).text(`Passage: ${q.passageRef.title}`, { indent: 20 });
-        }
-        if (q.passageRef?.text) {
-          doc.fontSize(10).text(q.passageRef.text, { indent: 20 });
-        }
-        if (q.passageRef?.marksLabel) {
-          doc.fontSize(10).text(`Passage Marks: ${q.passageRef.marksLabel}`, { indent: 20 });
-        }
-        doc.moveDown(0.4);
-
-        (q.subQuestions || []).forEach((sq, sqIndex) => {
-          const resp = (ans.passageResponses || []).find(
-            (r) => String(r.subQuestionId) === String(sq._id)
-          );
-          doc.fontSize(10).text(`  ${sqIndex + 1}. ${sq.prompt}`, { indent: 20 });
-
-          if (sq.type === 'mcq') {
-            (sq.options || []).forEach((opt, idx) => {
-              const selected = Number(resp?.selectedOption) === idx;
-              const marker = selected ? 'Selected' : '';
-              doc.text(`     ${String.fromCharCode(65 + idx)}. ${opt} ${marker}`, { indent: 20 });
-            });
-          } else {
-            doc.text(`     Answer: ${resp?.textAnswer || '-'}`, { indent: 20 });
-          }
-
-          const obtained = resp?.marksObtained ?? 0;
-          doc.text(`     Marks: ${obtained} / ${sq.credit}`, { indent: 20 });
-          doc.moveDown(0.3);
-        });
-      }
-
-      doc.moveDown();
+    const browser = await puppeteer.launch({
+      headless: "new",
+      args: ["--no-sandbox", "--disable-setuid-sandbox"]
     });
 
-    doc.end();
+    const page = await browser.newPage();
+
+    await page.setContent(html, {
+      waitUntil: "networkidle0"
+    });
+
+    const pdf = await page.pdf({
+      format: "A4",
+      printBackground: true,
+      margin: {
+        top: "20mm",
+        bottom: "20mm",
+        left: "15mm",
+        right: "15mm"
+      }
+    });
+
+    await browser.close();
+
+    const filename = `${attempt.examinee.username}_${attempt.exam.title}_result.pdf`
+      .replace(/\s+/g, "_");
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+
+    res.send(pdf);
+
   } catch (err) {
-    console.error('PDF generation error:', err);
-    res.status(500).json({ success: false, message: 'Failed to generate PDF' });
+    console.error("PDF generation error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Failed to generate PDF"
+    });
   }
 };
-

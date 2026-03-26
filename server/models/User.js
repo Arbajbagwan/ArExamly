@@ -9,7 +9,14 @@ const userSchema = new mongoose.Schema({
   },
   lastname: {
     type: String,
-    required: true,
+    trim: true
+  },
+  sbu: {
+    type: String,
+    trim: true
+  },
+  group: {
+    type: String,
     trim: true
   },
   username: {
@@ -28,7 +35,7 @@ const userSchema = new mongoose.Schema({
   password: {
     type: String,
     required: true,
-    minlength: 6
+    minlength: 3
   },
   role: {
     type: String,

@@ -25,6 +25,40 @@ const parseCustomInstructions = (raw) => {
   return String(raw).split('\n').map((x) => x.trim()).filter(Boolean);
 };
 
+const parseExamWindow = ({ startAt, endAt, scheduledDate, startTime, endTime }) => {
+  if (startAt && endAt) {
+    const start = new Date(startAt);
+    const end = new Date(endAt);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
+    return { start, end };
+  }
+
+  if (scheduledDate && startTime && endTime) {
+    const start = new Date(scheduledDate);
+    const [sh, sm] = String(startTime).split(':');
+    start.setHours(Number(sh), Number(sm), 0, 0);
+    const end = new Date(scheduledDate);
+    const [eh, em] = String(endTime).split(':');
+    end.setHours(Number(eh), Number(em), 0, 0);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
+    return { start, end };
+  }
+
+  return null;
+};
+
+const parseMinimumAttemptQuestions = (value) => {
+  if (value === undefined || value === null || value === '') return 0;
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isFinite(parsed) ? parsed : NaN;
+};
+
+const parsePassingMarks = (value) => {
+  if (value === undefined || value === null || value === '') return 0;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : NaN;
+};
+
 // @desc    Get all exams
 // @route   GET /api/exams
 // @access  Private
@@ -92,12 +126,13 @@ exports.getExams = async (req, res, next) => {
         attempt = await ExamAttempt.findOne({
           exam: exam._id,
           examinee: req.user._id
-        }).select('status');
+        }).select('status submittedAt');
       }
 
       result.push({
         ...exam.toObject(),
         myAttemptStatus: attempt?.status || null,
+        myAttemptSubmittedAt: attempt?.submittedAt || null,
         completedUsersCount: completionMap.get(String(exam._id)) || 0
       });
     }
@@ -175,6 +210,8 @@ exports.createExam = async (req, res, next) => {
       title,
       description,
       duration,
+      startAt,
+      endAt,
       scheduledDate,
       startTime,
       endTime,
@@ -182,6 +219,7 @@ exports.createExam = async (req, res, next) => {
       customInstructions,
       instructionLink,
       passingMarks,
+      minimumAttemptQuestions,
       shuffleQuestions,
       shuffleOptions,
       allowReview,
@@ -189,10 +227,34 @@ exports.createExam = async (req, res, next) => {
     } = req.body;
 
     // Validate required fields
-    if (!title || !duration || !scheduledDate || !startTime || !endTime) {
+    const parsedWindow = parseExamWindow({ startAt, endAt, scheduledDate, startTime, endTime });
+    const parsedMinimumAttemptQuestions = parseMinimumAttemptQuestions(minimumAttemptQuestions);
+    const parsedPassingMarks = parsePassingMarks(passingMarks);
+    if (!title || !duration || !parsedWindow) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide all required fields'
+        message: 'Please provide title, duration, start date-time, and end date-time'
+      });
+    }
+
+    if (!Number.isFinite(parsedMinimumAttemptQuestions) || parsedMinimumAttemptQuestions < 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide a valid minimum attempted questions value'
+      });
+    }
+
+    if (!Number.isFinite(parsedPassingMarks) || parsedPassingMarks < 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide a valid passing marks value'
+      });
+    }
+
+    if (parsedWindow.end <= parsedWindow.start) {
+      return res.status(400).json({
+        success: false,
+        message: 'End date-time must be after start date-time'
       });
     }
 
@@ -201,13 +263,16 @@ exports.createExam = async (req, res, next) => {
       title,
       description,
       duration: Number(duration),
-      scheduledDate: new Date(scheduledDate),
-      startTime,
-      endTime,
+      startAt: parsedWindow.start,
+      endAt: parsedWindow.end,
+      scheduledDate: new Date(parsedWindow.start),
+      startTime: `${String(parsedWindow.start.getHours()).padStart(2, '0')}:${String(parsedWindow.start.getMinutes()).padStart(2, '0')}`,
+      endTime: `${String(parsedWindow.end.getHours()).padStart(2, '0')}:${String(parsedWindow.end.getMinutes()).padStart(2, '0')}`,
       instructions,
       customInstructions: parseCustomInstructions(customInstructions),
       instructionLink: instructionLink || '',
-      passingMarks: passingMarks || 0,
+      passingMarks: parsedPassingMarks,
+      minimumAttemptQuestions: parsedMinimumAttemptQuestions,
       shuffleQuestions: toBool(shuffleQuestions, false),
       shuffleOptions: toBool(shuffleOptions, false),
       allowReview: toBool(allowReview, true),
@@ -215,10 +280,6 @@ exports.createExam = async (req, res, next) => {
       createdBy: req.user._id,
       status: 'draft'
     };
-
-    if (req.file) {
-      examData.instructionPdf = `/uploads/${path.basename(req.file.path)}`;
-    }
 
     const exam = await Exam.create(examData);
 
@@ -256,12 +317,12 @@ exports.updateExam = async (req, res, next) => {
     }
 
     // Don't allow editing active or completed exams
-    if (['active', 'completed'].includes(exam.status)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Cannot edit active or completed exams'
-      });
-    }
+    // if (['active', 'completed'].includes(exam.status)) {
+    //   return res.status(400).json({
+    //     success: false,
+    //     message: 'Cannot edit active or completed exams'
+    //   });
+    // }
 
     // Prepare update data
     const updateData = { ...req.body };
@@ -271,9 +332,61 @@ exports.updateExam = async (req, res, next) => {
       updateData.duration = Number(updateData.duration);
     }
 
-    // Convert scheduledDate to Date if provided
-    if (updateData.scheduledDate) {
-      updateData.scheduledDate = new Date(updateData.scheduledDate);
+    if (updateData.minimumAttemptQuestions !== undefined) {
+      const parsedMinimumAttemptQuestions = parseMinimumAttemptQuestions(updateData.minimumAttemptQuestions);
+      if (!Number.isFinite(parsedMinimumAttemptQuestions) || parsedMinimumAttemptQuestions < 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please provide a valid minimum attempted questions value'
+        });
+      }
+      updateData.minimumAttemptQuestions = parsedMinimumAttemptQuestions;
+    }
+
+    if (updateData.passingMarks !== undefined) {
+      const parsedPassingMarks = parsePassingMarks(updateData.passingMarks);
+      if (!Number.isFinite(parsedPassingMarks) || parsedPassingMarks < 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please provide a valid passing marks value'
+        });
+      }
+      updateData.passingMarks = parsedPassingMarks;
+    }
+
+    const hasAnyWindowField =
+      updateData.startAt !== undefined ||
+      updateData.endAt !== undefined ||
+      updateData.scheduledDate !== undefined ||
+      updateData.startTime !== undefined ||
+      updateData.endTime !== undefined;
+
+    if (hasAnyWindowField) {
+      const parsedWindow = parseExamWindow({
+        startAt: updateData.startAt ?? exam.startAt,
+        endAt: updateData.endAt ?? exam.endAt,
+        scheduledDate: updateData.scheduledDate ?? exam.scheduledDate,
+        startTime: updateData.startTime ?? exam.startTime,
+        endTime: updateData.endTime ?? exam.endTime
+      });
+      if (!parsedWindow) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please provide valid start and end date-time'
+        });
+      }
+      if (parsedWindow.end <= parsedWindow.start) {
+        return res.status(400).json({
+          success: false,
+          message: 'End date-time must be after start date-time'
+        });
+      }
+
+      updateData.startAt = parsedWindow.start;
+      updateData.endAt = parsedWindow.end;
+      updateData.scheduledDate = new Date(parsedWindow.start);
+      updateData.startTime = `${String(parsedWindow.start.getHours()).padStart(2, '0')}:${String(parsedWindow.start.getMinutes()).padStart(2, '0')}`;
+      updateData.endTime = `${String(parsedWindow.end.getHours()).padStart(2, '0')}:${String(parsedWindow.end.getMinutes()).padStart(2, '0')}`;
     }
 
     if (updateData.shuffleQuestions !== undefined) {
@@ -291,22 +404,7 @@ exports.updateExam = async (req, res, next) => {
     if (updateData.customInstructions !== undefined) {
       updateData.customInstructions = parseCustomInstructions(updateData.customInstructions);
     }
-    const removeInstructionPdf = toBool(updateData.removeInstructionPdf, false);
-    delete updateData.removeInstructionPdf;
-
-    if (req.file) {
-      // Replace existing PDF with newly uploaded file
-      if (exam.instructionPdf) {
-        const oldPath = path.join(__dirname, '..', exam.instructionPdf.replace(/^\//, ''));
-        await fs.unlink(oldPath).catch(() => {});
-      }
-      updateData.instructionPdf = `/uploads/${path.basename(req.file.path)}`;
-    } else if (removeInstructionPdf && exam.instructionPdf) {
-      const oldPath = path.join(__dirname, '..', exam.instructionPdf.replace(/^\//, ''));
-      await fs.unlink(oldPath).catch(() => {});
-      updateData.instructionPdf = '';
-    }
-
+    
     exam = await Exam.findByIdAndUpdate(
       req.params.id,
       updateData,
@@ -359,12 +457,12 @@ exports.deleteExam = async (req, res, next) => {
     }
 
     // Don't allow deleting active exams
-    if (exam.status === 'active') {
-      return res.status(400).json({
-        success: false,
-        message: 'Cannot delete active exams'
-      });
-    }
+    // if (exam.status === 'active') {
+    //   return res.status(400).json({
+    //     success: false,
+    //     message: 'Cannot delete active exams'
+    //   });
+    // }
 
     // Soft delete
     exam.isActive = false;
@@ -432,6 +530,8 @@ exports.assignQuestions = async (req, res, next) => {
     await exam.calculateTotalMarks();
     await exam.save();
 
+    await delCache(`exam:${exam._id}:data`);
+
     res.status(200).json({
       success: true,
       message: 'Questions assigned successfully',
@@ -448,11 +548,11 @@ exports.generateRandomQuestions = async (req, res, next) => {
     const exam = await Exam.findById(examId);
     if (!exam) return res.status(404).json({ success: false, message: 'Exam not found' });
 
-    if (exam.status === 'active' || exam.status === 'completed') {
-      return res.status(400).json({
-        message: 'Cannot change questions after exam has started'
-      });
-    }
+    // if (exam.status === 'active' || exam.status === 'completed') {
+    //   return res.status(400).json({
+    //     message: 'Cannot change questions after exam has started'
+    //   });
+    // }
 
     if (exam.questions.length > 0) {
       return res.status(400).json({
@@ -499,7 +599,7 @@ exports.generateRandomQuestions = async (req, res, next) => {
 
     return res.status(200).json({
       success: true,
-      message: 'Random rules saved! Questions will be picked uniquely when each student starts.',
+      message: 'Random rules saved! Questions will be picked uniquely when each users starts.',
       exam
     });
   } catch (err) {
@@ -553,6 +653,8 @@ exports.assignExaminees = async (req, res, next) => {
 
     await exam.save();
 
+    await delCache(`exam:${exam._id}:data`);
+
     res.status(200).json({
       success: true,
       message: 'Examinees assigned successfully',
@@ -588,6 +690,8 @@ exports.updateExamStatus = async (req, res, next) => {
 
     exam.status = status;
     await exam.save();
+
+    await delCache(`exam:${exam._id}:data`);
 
     res.status(200).json({
       success: true,

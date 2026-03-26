@@ -15,6 +15,7 @@ dotenv.config();
 connectDB();
 
 const app = express();
+app.set('trust proxy', 1);
 
 app.use(cors({
   origin: process.env.FRONTEND_URL || 'http://localhost:5173',
@@ -29,7 +30,9 @@ if (process.env.NODE_ENV === 'development') {
   app.use(morgan('dev'));
 }
 
-app.use(helmet());
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
+}));
 app.use(hpp());
 
 initRedis().catch(() => {});
@@ -54,8 +57,6 @@ try {
 
 app.use('/api', rateLimit(rateLimitConfig));
 
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-
 app.use('/api/auth', require('./routes/authRoutes'));
 app.use('/api/users', require('./routes/userRoutes'));
 app.use('/api/subjects', require('./routes/subjectRoutes'));
@@ -64,10 +65,19 @@ app.use('/api/passages', require('./routes/passageRoutes'));
 app.use('/api/exams', require('./routes/examRoutes'));
 app.use('/api/attempts', require('./routes/attemptRoutes'));
 
+const publicDir = path.join(__dirname, 'public');
+const indexFile = path.join(publicDir, 'index.html');
+app.use('/arexamly', express.static(publicDir));
+app.use('/arexamly', (req, res, next) => {
+  if (req.method !== 'GET') return next();
+  if (path.extname(req.path)) return next();
+  return res.sendFile(indexFile);
+});
+
 const errorHandler = require('./middleware/errorHandler');
 app.use(errorHandler);
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5011;
 const server = app.listen(PORT, () => {
   console.log(`Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
 });
@@ -76,4 +86,3 @@ process.on('unhandledRejection', (err) => {
   console.error('Unhandled Rejection:', err.message);
   server.close(() => process.exit(1));
 });
-

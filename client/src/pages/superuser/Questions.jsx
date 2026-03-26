@@ -7,14 +7,18 @@ import BulkUpload from '../../components/superuser/BulkUpload';
 import { useExamContext } from '../../contexts/ExamContext';
 import { questionService } from '../../services/questionService';
 import { passageService } from '../../services/passageService';
+import { ReactQuill, Quill, katex } from '../../utils/quillSetup';
+import 'react-quill-new/dist/quill.snow.css';
 
 const Questions = () => {
-  const { questions, subjects, refreshQuestions, refreshSubjects } = useExamContext();
+  const { subjects, questions, isReady, refreshQuestions, refreshSubjects } = useExamContext();
   const [showModal, setShowModal] = useState(false);
   const [showBulkModal, setShowBulkModal] = useState(false);
   const [showPassageModal, setShowPassageModal] = useState(false);
   const [formLoading, setFormLoading] = useState(false);
   const [editingId, setEditingId] = useState(null);
+  const [editingPassageId, setEditingPassageId] = useState(null);
+  const [selectedQuestionIds, setSelectedQuestionIds] = useState([]);
   const [passages, setPassages] = useState([]);
   const [passageForm, setPassageForm] = useState({
     title: '',
@@ -23,6 +27,45 @@ const Questions = () => {
     complexity: 'simple',
     marksLabel: ''
   });
+
+  const stripHtml = (html) => {
+    const raw = String(html || '');
+    if (typeof window !== 'undefined' && typeof window.DOMParser !== 'undefined') {
+      const doc = new window.DOMParser().parseFromString(raw, 'text/html');
+      return (doc.body.textContent || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+    return raw.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+  };
+
+  const isEditorEmpty = (html) => {
+    const raw = String(html || '');
+
+    // allow image-only content
+    if (raw.includes('<img')) return false;
+    if (raw.includes('ql-formula') || raw.includes('katex')) return false;
+    return stripHtml(raw).length === 0;
+  };
+
+  const quillModules = {
+    toolbar: [
+      [{ header: [1, 2, false] }],
+      ['bold', 'italic', 'underline'],
+      [{ list: 'ordered' }, { list: 'bullet' }],
+      ['link', 'image', 'formula'],
+      ['clean']
+    ],
+  };
+
+  const quillFormats = [
+    'header',
+    'bold',
+    'italic',
+    'underline',
+    'list',
+    'link',
+    'image',
+    'formula'
+  ];
 
   const loadPassages = async () => {
     try {
@@ -102,6 +145,17 @@ const Questions = () => {
     setEditingId(null);
   };
 
+  const resetPassageForm = () => {
+    setEditingPassageId(null);
+    setPassageForm({
+      title: '',
+      text: '',
+      topic: '',
+      complexity: 'simple',
+      marksLabel: ''
+    });
+  };
+
   const openCreateModal = () => {
     if (subjects.length === 0) {
       alert('Please create at least one subject first!');
@@ -121,10 +175,15 @@ const Questions = () => {
     setFormLoading(true);
 
     try {
+      if (isEditorEmpty(formData.question)) {
+        alert('Question is required');
+        setFormLoading(false);
+        return;
+      }
       const payload = { ...formData };
       if (!payload.passageRef) payload.passageRef = null;
       if (payload.type === 'mcq') {
-        payload.options = (payload.options || []).map((opt) => String(opt || '').trim()).filter(opt => opt !== '');
+        payload.options = (payload.options || []).map((opt) => String(opt || '')).filter((opt) => !isEditorEmpty(opt));
         if (payload.options.length < 2) {
           alert('Please provide at least 2 options for MCQ');
           setFormLoading(false);
@@ -148,6 +207,36 @@ const Questions = () => {
           setFormLoading(false);
           return;
         }
+        const normalizedSubQuestions = [];
+        for (const sq of payload.subQuestions) {
+          const normalized = {
+            ...sq,
+            prompt: String(sq.prompt || '').trim(),
+            credit: Number(sq.credit || 0)
+          };
+          if (!normalized.prompt) {
+            alert('Sub question text is required');
+            setFormLoading(false);
+            return;
+          }
+          if (normalized.type === 'mcq') {
+            const raw = Array.isArray(sq.options) ? sq.options : [];
+            const cleaned = raw.filter((opt) => !isEditorEmpty(opt));
+            if (cleaned.length < 2) {
+              alert('Each passage MCQ sub question must have at least 2 options');
+              setFormLoading(false);
+              return;
+            }
+            normalized.options = cleaned;
+            const co = Number(sq.correctOption || 0);
+            normalized.correctOption = co >= 0 && co < cleaned.length ? co : 0;
+          } else {
+            normalized.options = [];
+            delete normalized.correctOption;
+          }
+          normalizedSubQuestions.push(normalized);
+        }
+        payload.subQuestions = normalizedSubQuestions;
       } else {
         delete payload.subQuestions;
       }
@@ -196,8 +285,21 @@ const Questions = () => {
     try {
       await questionService.deleteQuestion(id);
       await Promise.all([refreshQuestions(), refreshSubjects()]);
+      setSelectedQuestionIds((prev) => prev.filter((qid) => qid !== id));
     } catch (error) {
       alert(error.response?.data?.message || 'Delete failed');
+    }
+  };
+
+  const handleBulkDeactivate = async () => {
+    if (selectedQuestionIds.length === 0) return;
+    if (!window.confirm(`Deactivate ${selectedQuestionIds.length} questions?`)) return;
+    try {
+      await questionService.bulkDeleteQuestions(selectedQuestionIds);
+      setSelectedQuestionIds([]);
+      await Promise.all([refreshQuestions(), refreshSubjects()]);
+    } catch (error) {
+      alert(error.response?.data?.message || 'Bulk deactivate failed');
     }
   };
 
@@ -242,36 +344,79 @@ const Questions = () => {
     });
   };
 
-  if (!questions || !subjects) {
+  const addPassageMcqOption = (subIndex) => {
+    setFormData((prev) => {
+      const arr = [...(prev.subQuestions || [])];
+      arr[subIndex] = arr[subIndex] || {};
+      arr[subIndex].options = [...(arr[subIndex].options || []), ''];
+      if (typeof arr[subIndex].correctOption !== 'number') arr[subIndex].correctOption = 0;
+      return { ...prev, subQuestions: arr };
+    });
+  };
+
+  const removePassageMcqOption = (subIndex, optionIndex) => {
+    setFormData((prev) => {
+      const arr = [...(prev.subQuestions || [])];
+      const sq = { ...(arr[subIndex] || {}) };
+      const opts = [...(sq.options || [])];
+      if (opts.length <= 2) return prev;
+      opts.splice(optionIndex, 1);
+      let nextCorrect = Number.isInteger(sq.correctOption) ? sq.correctOption : 0;
+      if (nextCorrect === optionIndex) nextCorrect = 0;
+      else if (nextCorrect > optionIndex) nextCorrect -= 1;
+      sq.options = opts;
+      sq.correctOption = nextCorrect;
+      arr[subIndex] = sq;
+      return { ...prev, subQuestions: arr };
+    });
+  };
+
+  const [expandedQuestions, setExpandedQuestions] = useState({})
+
+  const toggleQuestion = (id) => {
+    setExpandedQuestions(prev => ({
+      ...prev,
+      [id]: !prev[id]
+    }))
+  }
+
+  const htmlToText = (html = "") => stripHtml(html);
+
+  const selectedQuestionObjects = filteredQuestions.filter((q) => selectedQuestionIds.includes(q._id));
+  const hasActiveSelected = selectedQuestionObjects.some((q) => q.isActive);
+
+  if (!isReady) return <Loader />;
+
+  if (!subjects) {
     return <Loader />;
   }
 
   return (
-    <div className="flex flex-col h-screen bg-gray-100">
+    <div className="flex flex-col h-screen bg-base-200">
       <Navbar />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
-        <main className="flex-1 overflow-y-auto p-6">
-          <div className="max-w-7xl mx-auto">
+        <main className="flex-1 flex flex-col overflow-hidden p-3">
+          <div className="flex flex-col flex-1 min-h-0">
             {/* Header */}
-            <div className="flex flex-col md:flex-row md:items-center md:justify-between mb-6">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between mb-4">
               <div>
-                <h1 className="text-2xl font-bold text-gray-800">Questions</h1>
-                <p className="text-gray-500 mt-1">Create and manage your question bank</p>
+                <h1 className="text-2xl font-bold">Questions</h1>
+                <p className="text-base-content/70 mt-1">Create and manage your question bank</p>
               </div>
               <div className="flex flex-wrap gap-3 mt-4 md:mt-0">
                 <button
                   onClick={() => setShowBulkModal(true)}
-                  className="inline-flex items-center px-4 py-2 border border-green-600 text-green-600 font-medium rounded-lg hover:bg-green-50 transition-colors"
+                  className="btn btn-outline btn-success"
                 >
                   <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
                   </svg>
-                  Bulk Upload
+                  Upload Questions
                 </button>
                 <button
                   onClick={openCreateModal}
-                  className="inline-flex items-center px-4 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 transition-colors"
+                  className="btn btn-primary"
                 >
                   <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
@@ -282,31 +427,24 @@ const Questions = () => {
             </div>
 
             {/* Filters */}
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6">
-              <div className="flex flex-wrap items-center gap-4">
-                {/* Search */}
-                <div className="flex-1 min-w-[200px]">
-                  <div className="relative">
-                    <svg className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                    </svg>
-                    <input
-                      type="text"
-                      placeholder="Search questions..."
-                      className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-                      value={filters.search}
-                      onChange={(e) => setFilters({ ...filters, search: e.target.value })}
-                    />
-                  </div>
-                </div>
+            <div className="bg-base-100 border border-base-300 rounded px-2 py-2 mb-2">
 
-                {/* Subject Filter */}
+              <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
+
+                <input
+                  type="text"
+                  placeholder="Search..."
+                  className="input input-bordered input-xs w-full"
+                  value={filters.search}
+                  onChange={(e) => setFilters({ ...filters, search: e.target.value })}
+                />
+
                 <select
-                  className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                  className="select select-bordered select-xs w-full"
                   value={filters.subject}
                   onChange={(e) => setFilters({ ...filters, subject: e.target.value })}
                 >
-                  <option value="">All Subjects</option>
+                  <option value="">Subject</option>
                   {subjects.map((subject) => (
                     <option key={subject._id} value={subject._id}>
                       {subject.name}
@@ -314,90 +452,114 @@ const Questions = () => {
                   ))}
                 </select>
 
-                {/* Type Filter */}
                 <select
-                  className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                  className="select select-bordered select-xs w-full"
                   value={filters.type}
                   onChange={(e) => setFilters({ ...filters, type: e.target.value })}
                 >
-                  <option value="">All Types</option>
+                  <option value="">Type</option>
                   <option value="mcq">MCQ</option>
                   <option value="theory">Theory</option>
                   <option value="passage">Passage</option>
                 </select>
 
-                {/* Difficulty Filter */}
                 <select
-                  className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                  className="select select-bordered select-xs w-full"
                   value={filters.difficulty}
                   onChange={(e) => setFilters({ ...filters, difficulty: e.target.value })}
                 >
-                  <option value="">All Difficulties</option>
+                  <option value="">Difficulty</option>
                   <option value="easy">Easy</option>
                   <option value="medium">Medium</option>
                   <option value="hard">Hard</option>
                 </select>
 
-                {/* Clear Filters */}
-                {(filters.subject || filters.type || filters.difficulty || filters.search) && (
+                <div className="col-span-2 flex gap-1">
+                  {selectedQuestionIds.length > 0 && hasActiveSelected && (
+                    <button
+                      onClick={handleBulkDeactivate}
+                      className="btn btn-error btn-xs flex-1 text-white"
+                    >
+                      Deactivate
+                    </button>
+                  )}
                   <button
                     onClick={clearFilters}
-                    className="px-4 py-2 text-gray-600 hover:text-gray-800 font-medium"
+                    className="btn btn-ghost btn-xs flex-1"
                   >
-                    Clear Filters
+                    Clear
                   </button>
-                )}
+                </div>
+
               </div>
+
             </div>
 
             {/* Stats */}
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
-              <div className="bg-white rounded-xl shadow-sm p-4 border border-gray-200">
-                <p className="text-sm text-gray-500">Total Questions</p>
-                <p className="text-2xl font-bold text-gray-800">{filteredQuestions.length}</p>
+            <div className="grid grid-cols-5 gap-2 mb-2 text-xs">
+
+              <div className="bg-base-100 border border-base-300 rounded p-2 text-center">
+                <p className="text-base-content/60">Total</p>
+                <p className="font-semibold">{filteredQuestions.length}</p>
               </div>
-              <div className="bg-white rounded-xl shadow-sm p-4 border border-gray-200">
-                <p className="text-sm text-gray-500">MCQ</p>
-                <p className="text-2xl font-bold text-blue-600">
+
+              <div className="bg-base-100 border border-base-300 rounded p-2 text-center">
+                <p className="text-base-content/60">MCQ</p>
+                <p className="font-semibold text-primary">
                   {filteredQuestions.filter(q => q.type === 'mcq').length}
                 </p>
               </div>
-              <div className="bg-white rounded-xl shadow-sm p-4 border border-gray-200">
-                <p className="text-sm text-gray-500">Theory</p>
-                <p className="text-2xl font-bold text-purple-600">
+
+              <div className="bg-base-100 border border-base-300 rounded p-2 text-center">
+                <p className="text-base-content/60">Theory</p>
+                <p className="font-semibold text-secondary">
                   {filteredQuestions.filter(q => q.type === 'theory').length}
                 </p>
               </div>
-              <div className="bg-white rounded-xl shadow-sm p-4 border border-gray-200">
-                <p className="text-sm text-gray-500">Passage</p>
-                <p className="text-2xl font-bold text-indigo-600">
+
+              <div className="bg-base-100 border border-base-300 rounded p-2 text-center">
+                <p className="text-base-content/60">Passage</p>
+                <p className="font-semibold text-info">
                   {filteredQuestions.filter(q => q.type === 'passage').length}
                 </p>
               </div>
-              <div className="bg-white rounded-xl shadow-sm p-4 border border-gray-200">
-                <p className="text-sm text-gray-500">Subjects</p>
-                <p className="text-2xl font-bold text-green-600">{subjects.length}</p>
+
+              <div className="bg-base-100 border border-base-300 rounded p-2 text-center">
+                <p className="text-base-content/60">Subjects</p>
+                <p className="font-semibold text-success">{subjects.length}</p>
               </div>
+
             </div>
 
             {/* Questions Table */}
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead className="bg-gray-50 border-b border-gray-200">
+            <div className="bg-base-100 border border-base-300 rounded flex flex-col flex-1 overflow-hidden">
+              <div className="flex-1 overflow-auto">
+                <table className="table table-xs table-zebra table-fixed">
+                  <thead className="bg-base-200 sticky top-0 z-10">
                     <tr>
-                      <th className="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Question</th>
-                      <th className="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Subject</th>
-                      <th className="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Type</th>
-                      <th className="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Difficulty</th>
-                      <th className="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Credit</th>
-                      <th className="px-6 py-4 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
+                      <th className="w-[4%]">
+                        <input
+                          type="checkbox"
+                          className="checkbox checkbox-sm"
+                          checked={filteredQuestions.length > 0 && selectedQuestionIds.length === filteredQuestions.length}
+                          onChange={(e) =>
+                            setSelectedQuestionIds(e.target.checked ? filteredQuestions.map((q) => q._id) : [])
+                          }
+                        />
+                      </th>
+                      <th className="w-[38%] text-left text-xs font-semibold uppercase tracking-wider">Question</th>
+                      <th className="w-[14%] text-left text-xs font-semibold uppercase tracking-wider">Subject</th>
+                      <th className="w-[9%] text-left text-xs font-semibold uppercase tracking-wider">Type</th>
+                      <th className="w-[9%] text-left text-xs font-semibold uppercase tracking-wider">Difficulty</th>
+                      <th className="w-[8%] text-left text-xs font-semibold uppercase tracking-wider">Credit</th>
+                      <th className="w-[8%] text-left text-xs font-semibold uppercase tracking-wider">Status</th>
+                      <th className="w-[10%] text-right text-xs font-semibold uppercase tracking-wider">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-gray-200">
+                  <tbody>
                     {filteredQuestions.length === 0 ? (
                       <tr>
-                        <td colSpan="6" className="px-6 py-12 text-center text-gray-500">
+                        <td colSpan="8" className="py-12 text-center text-base-content/70">
                           {subjects.length === 0
                             ? 'Create subjects first, then add questions.'
                             : 'No questions found. Create your first question.'}
@@ -405,19 +567,44 @@ const Questions = () => {
                       </tr>
                     ) : (
                       filteredQuestions.map((question) => (
-                        <tr key={question._id} className="hover:bg-gray-50 transition-colors">
-                          <td className="px-6 py-4">
-                            <p className="text-gray-800 max-w-md truncate">{question.question}</p>
-                            {question.passageRef && (
-                              <p className="text-xs text-indigo-600 mt-1 font-medium">
-                                Passage-based question
-                              </p>
-                            )}
-                            {question.topic && question.topic !== 'General' && (
-                              <p className="text-xs text-gray-400 mt-1">Topic: {question.topic}</p>
-                            )}
+                        <tr key={question._id} className="hover">
+                          <td className="w-[4%] align-top">
+                            <input
+                              type="checkbox"
+                              className="checkbox checkbox-sm"
+                              checked={selectedQuestionIds.includes(question._id)}
+                              onChange={() =>
+                                setSelectedQuestionIds((prev) =>
+                                  prev.includes(question._id)
+                                    ? prev.filter((id) => id !== question._id)
+                                    : [...prev, question._id]
+                                )
+                              }
+                            />
                           </td>
-                          <td className="px-6 py-4">
+                          <td className="w-[38%] align-top">
+
+                            <div className="max-w-full text-xs break-words whitespace-normal">
+
+                              <div
+                                className={`exam-image ${expandedQuestions[question._id] ? "" : "line-clamp-2"
+                                  }`}
+                                dangerouslySetInnerHTML={{ __html: question.question }}
+                              />
+
+                              {htmlToText(question.question).length > 120 && (
+                                <button
+                                  onClick={() => toggleQuestion(question._id)}
+                                  className="text-primary text-[11px] mt-1"
+                                >
+                                  {expandedQuestions[question._id] ? "See less" : "See more"}
+                                </button>
+                              )}
+
+                            </div>
+
+                          </td>
+                          <td className="w-[14%] align-top">
                             <span
                               className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium text-white"
                               style={{ backgroundColor: question.subject?.color || '#6B7280' }}
@@ -425,31 +612,41 @@ const Questions = () => {
                               {question.subject?.name || 'Unknown'}
                             </span>
                           </td>
-                          <td className="px-6 py-4">
+                          <td className="w-[9%] align-top">
                             <span className={`px-2 py-1 rounded-full text-xs font-medium ${question.type === 'mcq' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
                               }`}>
                               {question.type?.toUpperCase()}
                             </span>
                           </td>
-                          <td className="px-6 py-4">
+                          <td className="w-[9%] align-top">
                             <span className={`px-2 py-1 rounded-full text-xs font-medium ${getDifficultyColor(question.difficulty)}`}>
                               {question.difficulty}
                             </span>
                           </td>
-                          <td className="px-6 py-4 text-gray-600">{question.credit}</td>
-                          <td className="px-6 py-4 text-right">
-                            <button
-                              onClick={() => handleEdit(question)}
-                              className="text-blue-600 hover:text-blue-800 font-medium mr-4"
-                            >
-                              Edit
-                            </button>
-                            <button
-                              onClick={() => handleDelete(question._id)}
-                              className="text-red-600 hover:text-red-800 font-medium"
-                            >
-                              Delete
-                            </button>
+                          <td className="w-[8%] align-top text-base-content/70">{question.credit}</td>
+                          <td className="w-[8%] align-top">
+                            <span className={`badge badge-xs ${question.isActive ? 'badge-success' : 'badge-error'}`}>
+                              {question.isActive ? 'Active' : 'Inactive'}
+                            </span>
+                          </td>
+                          <td className="w-[10%] align-top">
+                            <div className="flex justify-end whitespace-nowrap">
+                              <button
+                                onClick={() => handleEdit(question)}
+                                className="btn btn-ghost btn-xs text-info"
+                              >
+                                Edit
+                              </button>
+
+                              {question.isActive && (
+                                <button
+                                  onClick={() => handleDelete(question._id)}
+                                  className="btn btn-ghost btn-xs text-error"
+                                >
+                                  Delete
+                                </button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       ))
@@ -471,11 +668,12 @@ const Questions = () => {
       >
         <form onSubmit={handleSubmit} className="space-y-4">
           {/* Subject and Type Row */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-3 gap-2">
+
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Subject *</label>
+              <label className="text-[11px] text-base-content/70">Subject<span className="text-error">*</span></label>
               <select
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                className="select select-bordered select-xs w-full h-8 mt-0.5"
                 value={formData.subject}
                 onChange={(e) => setFormData({ ...formData, subject: e.target.value })}
                 required
@@ -488,22 +686,24 @@ const Questions = () => {
                 ))}
               </select>
             </div>
+
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Type *</label>
+              <label className="text-[11px] text-base-content/70">Type<span className="text-error">*</span></label>
               <select
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                className="select select-bordered select-xs w-full h-8 mt-0.5"
                 value={formData.type}
                 onChange={(e) => setFormData({ ...formData, type: e.target.value })}
               >
-                <option value="mcq">Multiple Choice (MCQ)</option>
+                <option value="mcq">MCQ</option>
                 <option value="theory">Theory</option>
                 <option value="passage">Passage</option>
               </select>
             </div>
+
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Difficulty</label>
+              <label className="text-[11px] text-base-content/70">Difficulty</label>
               <select
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                className="select select-bordered select-xs w-full h-8 mt-0.5"
                 value={formData.difficulty}
                 onChange={(e) => setFormData({ ...formData, difficulty: e.target.value })}
               >
@@ -512,28 +712,31 @@ const Questions = () => {
                 <option value="hard">Hard</option>
               </select>
             </div>
+
           </div>
 
           {/* Topic and Credit Row */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-2 gap-2">
+
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Topic/Chapter</label>
+              <label className="text-[11px] text-base-content/70">Topic</label>
               <input
                 type="text"
-                placeholder="e.g., Algebra, Chapter 1"
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                placeholder="e.g. Algebra"
+                className="input input-bordered input-xs w-full h-8 mt-0.5"
                 value={formData.topic}
                 onChange={(e) => setFormData({ ...formData, topic: e.target.value })}
               />
             </div>
+
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Credit (Marks) {formData.type === 'passage' ? '(Auto from sub-questions)' : '*'}
+              <label className="text-[11px] text-base-content/70">
+                Credit{formData.type === 'passage' ? '(auto)' : <span className="text-error">*</span>}
               </label>
               <input
                 type="number"
                 min="1"
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                className="input input-bordered input-xs w-full h-8 mt-0.5"
                 value={formData.credit}
                 onChange={(e) => setFormData({ ...formData, credit: Number(e.target.value) })}
                 disabled={formData.type === 'passage'}
@@ -544,51 +747,59 @@ const Questions = () => {
 
           {/* Question */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              {formData.type === 'passage' ? 'Passage Question Title/Instruction *' : 'Question *'}
+            <label className="text-[11px] text-base-content/70">
+              {formData.type === 'passage' ? "Passage Instruction" : "Question"}
+              <span className="text-error">*</span>
             </label>
-            <textarea
-              placeholder={formData.type === 'passage' ? 'e.g., Read the passage and answer all sub-questions.' : 'Enter your question here...'}
-              rows="3"
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none resize-none"
-              value={formData.question}
-              onChange={(e) => setFormData({ ...formData, question: e.target.value })}
-              required
-            />
+            <div className="quill-modal-scope rounded-lg border border-base-300 bg-base-100">
+              <ReactQuill
+                theme="snow"
+                value={formData.question}
+                onChange={(value) => setFormData({ ...formData, question: value })}
+                modules={quillModules}
+                formats={quillFormats}
+                bounds=".quill-modal-scope"
+                placeholder={formData.type === 'passage' ? 'e.g., Read the passage and answer all sub-questions.' : 'Enter your question here...'}
+              />
+            </div>
           </div>
 
           {/* MCQ Options */}
           {formData.type === 'mcq' && (
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Options * <span className="text-gray-400 font-normal">(Select the correct answer)</span>
+              <label className="text-[11px] text-base-content/70">
+                Options<span className="text-error">*</span> <span className="text-gray-400 font-normal">(Select the correct answer)</span>
               </label>
               <div className="space-y-3">
                 {formData.options.map((option, index) => (
-                  <div key={index} className="flex items-center gap-3">
+                  <div key={index} className="flex items-start gap-3">
                     <input
                       type="radio"
                       name="correctOption"
-                      className="w-4 h-4 text-blue-600 focus:ring-blue-500"
+                      className="radio radio-sm radio-primary mt-4"
                       checked={formData.correctOption === index}
                       onChange={() => setFormData({ ...formData, correctOption: index })}
                     />
-                    <input
-                      type="text"
-                      placeholder={`Option ${index + 1}`}
-                      className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-                      value={option}
-                      onChange={(e) => {
-                        const newOptions = [...formData.options];
-                        newOptions[index] = e.target.value;
-                        setFormData({ ...formData, options: newOptions });
-                      }}
-                    />
+                    <div className="quill-modal-scope flex-1 rounded-lg border border-base-300 bg-base-100">
+                      <ReactQuill
+                        theme="snow"
+                        value={option}
+                        onChange={(value) => {
+                          const newOptions = [...formData.options];
+                          newOptions[index] = value;
+                          setFormData({ ...formData, options: newOptions });
+                        }}
+                        modules={quillModules}
+                        formats={quillFormats}
+                        bounds=".quill-modal-scope"
+                        placeholder={`Option ${index + 1}`}
+                      />
+                    </div>
                     <button
                       type="button"
                       onClick={() => removeMcqOption(index)}
                       disabled={formData.options.length <= 2}
-                      className="px-3 py-2 text-sm border rounded-lg text-red-600 border-red-200 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                      className="btn btn-outline btn-error btn-sm disabled:opacity-40 mt-1"
                     >
                       Remove
                     </button>
@@ -597,7 +808,7 @@ const Questions = () => {
                 <button
                   type="button"
                   onClick={addMcqOption}
-                  className="px-3 py-2 text-sm border rounded-lg text-blue-700 border-blue-200 hover:bg-blue-50"
+                  className="btn btn-outline btn-primary btn-sm"
                 >
                   + Add Option
                 </button>
@@ -605,39 +816,89 @@ const Questions = () => {
             </div>
           )}
 
+          {/* {Passage} */}
           {formData.type === 'passage' && (
-            <div className="space-y-3 border border-indigo-200 rounded-lg p-4 bg-indigo-50">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="space-y-2 border border-info/30 rounded-lg p-3 bg-info/10">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                 <div>
                   <div className="flex items-center justify-between mb-1">
-                    <label className="block text-sm font-medium text-gray-700">Passage *</label>
+                    <label className="text-[11px] text-base-content/70">Passage<span className="text-error">*</span></label>
                     <button
                       type="button"
                       onClick={async () => {
                         if (passages.length === 0) await loadPassages();
+                        resetPassageForm();
                         setShowPassageModal(true);
                       }}
-                      className="text-sm text-indigo-600 hover:text-indigo-800"
+                      className="text-[11px] link link-primary"
                     >
                       + Create Passage
                     </button>
                   </div>
-                  <select
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg outline-none"
-                    value={formData.passageRef}
-                    onChange={(e) => setFormData({ ...formData, passageRef: e.target.value })}
-                    required
-                  >
-                    <option value="">Select Passage</option>
-                    {passages.map((p) => (
-                      <option key={p._id} value={p._id}>{p.title}</option>
-                    ))}
-                  </select>
+                  <div className="dropdown w-full">
+                    {/* The Trigger (looks like a select box) */}
+                    <div
+                      tabIndex={0}
+                      role="button"
+                      className="select select-bordered select-xs w-full h-8 flex items-center justify-between"
+                    >
+                      {passages.find(p => p._id === formData.passageRef)?.title || "Select Passage"}
+                    </div>
+
+                    {/* The Menu Content */}
+                    <ul
+                      tabIndex={0}
+                      className="dropdown-content z-[1] menu p-1 shadow bg-base-100 rounded-box w-full max-h-60 overflow-y-auto border"
+                    >
+                      {passages.map((p) => (
+                        <li key={p._id} className="border-b last:border-0">
+                          <div className="flex items-center justify-between py-1 text-xs">
+                            {/* Clicking the title selects it */}
+                            <span
+                              className="flex-grow cursor-pointer hover:text-primary"
+                              onClick={() => setFormData({ ...formData, passageRef: p._id })}
+                            >
+                              {p.title}
+                            </span>
+
+                            {/* Action Buttons */}
+                            <div className="flex gap-1">
+                              <button
+                                type="button"
+                                className="btn btn-xs btn-ghost text-info"
+                                onClick={(e) => {
+                                  e.stopPropagation(); // Prevents selecting the item when clicking Edit
+                                  setPassageForm(p);
+                                  setEditingPassageId(p._id);
+                                  setShowPassageModal(true);
+                                }}
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-xs btn-ghost text-error"
+                                onClick={async (e) => {
+                                  e.stopPropagation(); // Prevents selecting the item when clicking Delete
+                                  if (!window.confirm("Delete passage?")) return;
+                                  await passageService.deletePassage(p._id);
+                                  setPassages(prev => prev.filter(x => x._id !== p._id));
+                                }}
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+                        </li>
+                      ))}
+                      {passages.length === 0 && <li className="p-2 text-center opacity-50">No passages found</li>}
+                    </ul>
+                  </div>
                 </div>
                 <div className="flex items-end">
                   <button
                     type="button"
-                    className="px-3 py-2 border rounded-lg text-indigo-700"
+                    className="btn btn-outline btn-primary btn-sm"
                     onClick={() =>
                       setFormData({
                         ...formData,
@@ -651,11 +912,11 @@ const Questions = () => {
               </div>
 
               {formData.subQuestions.map((sq, i) => (
-                <div key={i} className="border rounded-lg p-3 bg-white">
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2">
+                <div key={i} className="border border-base-300 rounded-lg p-3 bg-base-100">
+                  <div className="grid grid-cols-1 md:grid-cols-12 gap-2 mb-2 items-center">
                     <input
                       type="text"
-                      className="md:col-span-2 px-3 py-2 border rounded"
+                      className="md:col-span-7 input input-bordered"
                       placeholder={`Sub Question ${i + 1}`}
                       value={sq.prompt}
                       onChange={(e) => {
@@ -665,7 +926,7 @@ const Questions = () => {
                       }}
                     />
                     <select
-                      className="px-3 py-2 border rounded"
+                      className="md:col-span-3 select select-bordered"
                       value={sq.type}
                       onChange={(e) => {
                         const arr = [...formData.subQuestions];
@@ -683,12 +944,10 @@ const Questions = () => {
                       <option value="mcq">MCQ</option>
                       <option value="theory">Theory</option>
                     </select>
-                  </div>
-                  <div className="flex gap-2 items-center mb-2">
                     <input
                       type="number"
                       min="1"
-                      className="w-28 px-3 py-2 border rounded"
+                      className="md:col-span-1 input input-bordered"
                       value={sq.credit}
                       onChange={(e) => {
                         const arr = [...formData.subQuestions];
@@ -698,7 +957,7 @@ const Questions = () => {
                     />
                     <button
                       type="button"
-                      className="text-red-600 text-sm"
+                      className="md:col-span-1 btn btn-ghost btn-xs text-error justify-start md:justify-center"
                       onClick={() => {
                         const arr = formData.subQuestions.filter((_, idx) => idx !== i);
                         setFormData({ ...formData, subQuestions: arr });
@@ -710,9 +969,10 @@ const Questions = () => {
                   {sq.type === 'mcq' && (
                     <div className="space-y-2">
                       {(sq.options || []).map((opt, idx) => (
-                        <div key={idx} className="flex items-center gap-2">
+                        <div key={idx} className="flex items-start gap-2">
                           <input
                             type="radio"
+                            className="radio radio-sm radio-primary"
                             checked={sq.correctOption === idx}
                             onChange={() => {
                               const arr = [...formData.subQuestions];
@@ -720,19 +980,65 @@ const Questions = () => {
                               setFormData({ ...formData, subQuestions: arr });
                             }}
                           />
-                          <input
-                            type="text"
-                            className="flex-1 px-3 py-2 border rounded"
-                            placeholder={`Option ${idx + 1}`}
-                            value={opt}
-                            onChange={(e) => {
-                              const arr = [...formData.subQuestions];
-                              arr[i].options[idx] = e.target.value;
-                              setFormData({ ...formData, subQuestions: arr });
-                            }}
-                          />
+                          <div className="quill-modal-scope flex-1 rounded-lg border border-base-300 bg-base-100">
+                            <ReactQuill
+                              theme="snow"
+                              value={opt}
+                              onChange={(value) => {
+                                const arr = [...formData.subQuestions];
+                                arr[i].options[idx] = value;
+                                setFormData({ ...formData, subQuestions: arr });
+                              }}
+                              modules={quillModules}
+                              formats={quillFormats}
+                              bounds=".quill-modal-scope"
+                              placeholder={`Option ${idx + 1}`}
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => removePassageMcqOption(i, idx)}
+                            disabled={(sq.options || []).length <= 2}
+                            className="btn btn-outline btn-error btn-xs mt-1 disabled:opacity-40"
+                          >
+                            Remove
+                          </button>
                         </div>
                       ))}
+                      <div className="flex justify-between mt-4">
+                        <button
+                          type="button"
+                          className="btn btn-outline btn-primary btn-xs"
+                          onClick={() =>
+                            setFormData({
+                              ...formData,
+                              subQuestions: [
+                                ...formData.subQuestions,
+                                {
+                                  prompt: '',
+                                  type: 'mcq',
+                                  options: ['', '', '', ''],
+                                  correctOption: 0,
+                                  credit: 1
+                                }
+                              ]
+                            })
+                          }
+                        >
+                          + Add Sub Question
+                        </button>
+
+                        {formData.subQuestions.length > 0 &&
+                          formData.subQuestions[formData.subQuestions.length - 1].type === 'mcq' && (
+                            <button
+                              type="button"
+                              onClick={() => addPassageMcqOption(formData.subQuestions.length - 1)}
+                              className="btn btn-outline btn-primary btn-xs"
+                            >
+                              + Add Option
+                            </button>
+                          )}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -742,31 +1048,37 @@ const Questions = () => {
 
           {/* Explanation */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Explanation (Optional)</label>
-            <textarea
-              placeholder="Explain the answer..."
-              rows="2"
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none resize-none"
-              value={formData.explanation}
-              onChange={(e) => setFormData({ ...formData, explanation: e.target.value })}
-            />
+            <label className="text-[11px] text-base-content/70">
+              Explanation <span className="label-text font-medium">(Optional)</span>
+            </label>
+            <div className="quill-modal-scope rounded-lg border border-base-300 bg-base-100">
+              <ReactQuill
+                theme="snow"
+                value={formData.explanation}
+                onChange={(value) => setFormData({ ...formData, explanation: value })}
+                modules={quillModules}
+                formats={quillFormats}
+                bounds=".quill-modal-scope"
+                placeholder="Explain the answer..."
+              />
+            </div>
           </div>
 
-          <div className="flex justify-end space-x-3 pt-4 border-t border-gray-200">
+          <div className="flex justify-end space-x-3 pt-4 border-t border-base-300">
             <button
               type="button"
               onClick={closeModal}
-              className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
+              className="btn btn-ghost btn-sm"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={formLoading}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-blue-400 flex items-center"
+              className="btn btn-primary btn-sm"
             >
               {formLoading && (
-                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+                <span className="loading loading-spinner loading-xs mr-2"></span>
               )}
               {editingId ? 'Update Question' : 'Create Question'}
             </button>
@@ -778,12 +1090,13 @@ const Questions = () => {
       <Modal
         isOpen={showBulkModal}
         onClose={() => setShowBulkModal(false)}
-        title="Bulk Upload Questions"
+        title="Upload Questions"
       >
         <BulkUpload
           type="questions"
           subjects={subjects}
           onSuccess={() => {
+            setSelectedQuestionIds([]);
             Promise.all([refreshQuestions(), refreshSubjects()]);
           }}
         />
@@ -792,38 +1105,168 @@ const Questions = () => {
       <Modal
         isOpen={showPassageModal}
         onClose={() => setShowPassageModal(false)}
-        title="Create Passage"
+        title={editingPassageId ? "Edit Passage" : "Create Passage"}
       >
         <form
           className="space-y-3"
           onSubmit={async (e) => {
             e.preventDefault();
+
+            if (!passageForm.title.trim()) {
+              alert("Title is required");
+              return;
+            }
+
+            if (isEditorEmpty(passageForm.text)) {
+              alert("Passage text is required");
+              return;
+            }
+
             try {
-              const res = await passageService.createPassage(passageForm);
-              setPassages((prev) => [res.passage, ...prev]);
-              setFormData((prev) => ({ ...prev, passageRef: res.passage._id }));
-              setPassageForm({ title: '', text: '', topic: '', complexity: 'simple', marksLabel: '' });
+              let res;
+
+              if (editingPassageId) {
+                res = await passageService.updatePassage(
+                  editingPassageId,
+                  passageForm
+                );
+
+                setPassages(prev =>
+                  prev.map(p =>
+                    p._id === editingPassageId ? res.passage : p
+                  )
+                );
+
+              } else {
+
+                res = await passageService.createPassage(passageForm);
+
+                setPassages(prev => [res.passage, ...prev]);
+
+                setFormData(prev => ({
+                  ...prev,
+                  passageRef: res.passage._id
+                }));
+
+              }
+
+              resetPassageForm();
               setShowPassageModal(false);
+
             } catch (err) {
-              alert(err.response?.data?.message || 'Failed to create passage');
+              alert(err.response?.data?.message || "Failed to create passage");
             }
           }}
         >
-          <input className="w-full px-3 py-2 border rounded-lg" placeholder="Title" value={passageForm.title} onChange={(e) => setPassageForm({ ...passageForm, title: e.target.value })} required />
-          <input className="w-full px-3 py-2 border rounded-lg" placeholder="Topic" value={passageForm.topic} onChange={(e) => setPassageForm({ ...passageForm, topic: e.target.value })} />
-          <div className="grid grid-cols-2 gap-3">
-            <select className="w-full px-3 py-2 border rounded-lg" value={passageForm.complexity} onChange={(e) => setPassageForm({ ...passageForm, complexity: e.target.value })}>
-              <option value="simple">Simple</option>
-              <option value="moderate">Moderate</option>
-              <option value="complex">Complex</option>
-            </select>
-            <input className="w-full px-3 py-2 border rounded-lg" placeholder="Marks label" value={passageForm.marksLabel} onChange={(e) => setPassageForm({ ...passageForm, marksLabel: e.target.value })} />
+
+          {/* Title */}
+          <div>
+            <label className="text-[11px] text-base-content/70">
+              Title <span className="text-error">*</span>
+            </label>
+            <input
+              type="text"
+              className="input input-bordered input-xs w-full h-8 mt-0.5"
+              value={passageForm.title}
+              onChange={(e) =>
+                setPassageForm({ ...passageForm, title: e.target.value })
+              }
+            />
           </div>
-          <textarea className="w-full px-3 py-2 border rounded-lg" rows="7" placeholder="Passage text" value={passageForm.text} onChange={(e) => setPassageForm({ ...passageForm, text: e.target.value })} required />
-          <div className="flex justify-end gap-2">
-            <button type="button" onClick={() => setShowPassageModal(false)} className="px-4 py-2 border rounded-lg">Cancel</button>
-            <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg">Save Passage</button>
+
+          {/* Topic */}
+          <div>
+            <label className="text-[11px] text-base-content/70">
+              Topic
+            </label>
+            <input
+              type="text"
+              className="input input-bordered input-xs w-full h-8 mt-0.5"
+              value={passageForm.topic}
+              onChange={(e) =>
+                setPassageForm({ ...passageForm, topic: e.target.value })
+              }
+            />
           </div>
+
+          {/* Complexity + Marks */}
+          <div className="grid grid-cols-2 gap-2">
+
+            <div>
+              <label className="text-[11px] text-base-content/70">
+                Complexity
+              </label>
+              <select
+                className="select select-bordered select-xs w-full h-8 mt-0.5"
+                value={passageForm.complexity}
+                onChange={(e) =>
+                  setPassageForm({ ...passageForm, complexity: e.target.value })
+                }
+              >
+                <option value="simple">Simple</option>
+                <option value="moderate">Moderate</option>
+                <option value="complex">Complex</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="text-[11px] text-base-content/70">
+                Marks Label
+              </label>
+              <input
+                type="text"
+                className="input input-bordered input-xs w-full h-8 mt-0.5"
+                value={passageForm.marksLabel}
+                onChange={(e) =>
+                  setPassageForm({ ...passageForm, marksLabel: e.target.value })
+                }
+              />
+            </div>
+
+          </div>
+
+          {/* Passage Text */}
+          <div>
+            <label className="text-[11px] text-base-content/70">
+              Passage Text <span className="text-error">*</span>
+            </label>
+
+            <div className="quill-modal-scope rounded-lg border border-base-300 bg-base-100 mt-0.5">
+              <ReactQuill
+                theme="snow"
+                value={passageForm.text}
+                onChange={(value) =>
+                  setPassageForm({ ...passageForm, text: value })
+                }
+                modules={quillModules}
+                formats={quillFormats}
+                bounds=".quill-modal-scope"
+                placeholder="Passage text"
+              />
+            </div>
+          </div>
+
+          {/* Buttons */}
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              type="button"
+              onClick={() => {
+                setShowPassageModal(false);
+                resetPassageForm();
+              }}
+              className="btn btn-ghost btn-xs"
+            >
+              Cancel
+            </button>
+
+            <button
+              type="submit"
+              className="btn btn-primary btn-xs"
+            >
+              Save Passage
+            </button>
+          </div>
+
         </form>
       </Modal>
     </div>

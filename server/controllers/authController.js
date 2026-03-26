@@ -7,7 +7,7 @@ const crypto = require('crypto');
 // @access  Private (Admin/SuperUser)
 exports.register = async (req, res, next) => {
   try {
-    const { firstname, lastname, username, email, password, role } = req.body;
+    const { firstname, lastname, sbu, group, username, email, password, role } = req.body;
 
     // Role-based creation validation
     if (req.user.role === 'admin' && role !== 'superuser') {
@@ -27,6 +27,8 @@ exports.register = async (req, res, next) => {
     const user = await User.create({
       firstname,
       lastname,
+      sbu,
+      group,
       username,
       email,
       password,
@@ -69,7 +71,7 @@ exports.login = async (req, res, next) => {
     if (!user) {
       return res.status(401).json({
         success: false,
-        message: 'Invalid credentials'
+        message: 'Account not found'
       });
     }
 
@@ -222,7 +224,7 @@ exports.changePassword = async (req, res, next) => {
     const isMatch = await user.comparePassword(currentPassword);
 
     if (!isMatch) {
-      return res.status(401).json({
+      return res.status(400).json({
         success: false,
         message: 'Current password is incorrect'
       });

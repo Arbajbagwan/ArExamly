@@ -13,6 +13,11 @@ const ChangePassword = () => {
     newPassword: '',
     confirmNewPassword: ''
   });
+  const [showPasswords, setShowPasswords] = useState({
+    currentPassword: false,
+    newPassword: false,
+    confirmNewPassword: false
+  });
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
@@ -41,7 +46,7 @@ const ChangePassword = () => {
     try {
       await authService.changePassword(passwords.currentPassword, passwords.newPassword);
       setSuccess('Password changed successfully! You will be logged out to sign in again.');
-      
+
       // Log out user after a short delay
       setTimeout(() => {
         logout();
@@ -56,82 +61,157 @@ const ChangePassword = () => {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-gray-100">
+    <div className="flex flex-col h-screen bg-base-200">
       <Navbar />
+
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
-        <main className="flex-1 overflow-y-auto p-6">
-          <div className="max-w-xl mx-auto">
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-              <h1 className="text-2xl font-bold text-gray-800 mb-6">Change Password</h1>
 
-              {error && (
-                <div className="mb-4 p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm">
-                  {error}
-                </div>
-              )}
-              {success && (
-                <div className="mb-4 p-4 bg-green-50 border border-green-200 text-green-700 rounded-lg text-sm">
-                  {success}
-                </div>
-              )}
+        <main className="flex-1 flex items-center justify-center overflow-hidden p-3 bg-gradient-to-br from-base-200 via-base-200 to-base-300">
+          <div className="w-full max-w-md">
 
-              <form onSubmit={handleSubmit} className="space-y-5">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Current Password
-                  </label>
-                  <input
-                    type="password"
-                    name="currentPassword"
-                    value={passwords.currentPassword}
-                    onChange={handleInputChange}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-                    required
-                  />
-                </div>
+            {/* Card */}
+            <div className="bg-base-100 border border-base-300 rounded-xl shadow-md p-4">
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    New Password
-                  </label>
-                  <input
-                    type="password"
-                    name="newPassword"
-                    value={passwords.newPassword}
-                    onChange={handleInputChange}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-                    required
-                  />
-                </div>
+              {/* Header */}
+              <div className="text-center mb-3">
+                <h1 className="text-xl font-semibold">Change Password</h1>
+                <p className="text-xs text-base-content/60">
+                  Update your account password
+                </p>
+              </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Confirm New Password
-                  </label>
-                  <input
-                    type="password"
-                    name="confirmNewPassword"
-                    value={passwords.confirmNewPassword}
-                    onChange={handleInputChange}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-                    required
-                  />
-                </div>
+              <div className="bg-base-100 border border-base-300 rounded p-3">
 
-                <div className="pt-2">
-                  <button
-                    type="submit"
-                    disabled={loading || success}
-                    className="w-full py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors disabled:bg-blue-400 flex items-center justify-center"
-                  >
-                    {loading && (
-                      <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                    )}
-                    {loading ? 'Updating...' : 'Update Password'}
-                  </button>
-                </div>
-              </form>
+                {error && (
+                  <div className="alert justify-center alert-error py-2 mb-2 text-xs">
+                    {error}
+                  </div>
+                )}
+
+                {success && (
+                  <div className="alert justify-center alert-success py-2 mb-2 text-xs">
+                    {success}
+                  </div>
+                )}
+
+                <form onSubmit={handleSubmit} className="space-y-2 text-sm">
+
+                  {/* Current Password */}
+                  <div>
+                    <label className="text-[11px] text-base-content/70">
+                      Current Password
+                    </label>
+
+                    <div className="relative">
+                      <input
+                        type={showPasswords.currentPassword ? "text" : "password"}
+                        name="currentPassword"
+                        value={passwords.currentPassword}
+                        onChange={handleInputChange}
+                        className="input input-bordered input-xs w-full h-8 mt-0.5 pr-12"
+                        required
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setShowPasswords((p) => ({
+                            ...p,
+                            currentPassword: !p.currentPassword
+                          }))
+                        }
+                        className="absolute right-1 top-1/2 -translate-y-1/2 btn btn-ghost btn-xs h-6"
+                      >
+                        {showPasswords.currentPassword ? "Hide" : "Show"}
+                      </button>
+                    </div>
+                  </div>
+
+
+                  {/* New Password */}
+                  <div>
+                    <label className="text-[11px] text-base-content/70">
+                      New Password
+                    </label>
+
+                    <div className="relative">
+                      <input
+                        type={showPasswords.newPassword ? "text" : "password"}
+                        name="newPassword"
+                        value={passwords.newPassword}
+                        onChange={handleInputChange}
+                        className="input input-bordered input-xs w-full h-8 mt-0.5 pr-12"
+                        required
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setShowPasswords((p) => ({
+                            ...p,
+                            newPassword: !p.newPassword
+                          }))
+                        }
+                        className="absolute right-1 top-1/2 -translate-y-1/2 btn btn-ghost btn-xs h-6"
+                      >
+                        {showPasswords.newPassword ? "Hide" : "Show"}
+                      </button>
+                    </div>
+                  </div>
+
+
+                  {/* Confirm Password */}
+                  <div>
+                    <label className="text-[11px] text-base-content/70">
+                      Confirm New Password
+                    </label>
+
+                    <div className="relative">
+                      <input
+                        type={showPasswords.confirmNewPassword ? "text" : "password"}
+                        name="confirmNewPassword"
+                        value={passwords.confirmNewPassword}
+                        onChange={handleInputChange}
+                        className="input input-bordered input-xs w-full h-8 mt-0.5 pr-12"
+                        required
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setShowPasswords((p) => ({
+                            ...p,
+                            confirmNewPassword: !p.confirmNewPassword
+                          }))
+                        }
+                        className="absolute right-1 top-1/2 -translate-y-1/2 btn btn-ghost btn-xs h-6"
+                      >
+                        {showPasswords.confirmNewPassword ? "Hide" : "Show"}
+                      </button>
+                    </div>
+                  </div>
+
+
+                  {/* Submit */}
+                  <div className="flex justify-end pt-2 border-t border-base-300">
+
+                    <button
+                      type="submit"
+                      disabled={loading || success}
+                      className="btn btn-primary btn-xs h-7"
+                    >
+                      {loading && (
+                        <span className="loading loading-spinner loading-xs mr-1"></span>
+                      )}
+                      {loading ? "Updating..." : "Update Password"}
+                    </button>
+
+                  </div>
+
+                </form>
+
+              </div>
             </div>
           </div>
         </main>

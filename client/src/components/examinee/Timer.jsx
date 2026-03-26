@@ -1,11 +1,32 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 
-const Timer = ({ duration, onTimeUp, startTime }) => {
+const Timer = ({ duration, onTimeUp, startTime, serverNow, expiresAt }) => {
+  const syncedServerMsRef = useRef(0);
+  const syncedPerfMsRef = useRef(0);
+  const hasTimedOutRef = useRef(false);
+
+  useEffect(() => {
+    const parsed = new Date(serverNow).getTime();
+    syncedServerMsRef.current = Number.isFinite(parsed) ? parsed : Date.now();
+    syncedPerfMsRef.current = performance.now();
+  }, [serverNow]);
+
+  const getServerNowMs = useCallback(() => {
+    if (!syncedServerMsRef.current) return Date.now();
+    return syncedServerMsRef.current + (performance.now() - syncedPerfMsRef.current);
+  }, []);
+
   const getRemainingTime = useCallback(() => {
-    const elapsed = Math.floor((Date.now() - new Date(startTime)) / 1000);
-    const remaining = (duration * 60) - elapsed;
+    const expiryMs = new Date(expiresAt).getTime();
+    if (!Number.isFinite(expiryMs)) {
+      const elapsed = Math.floor((getServerNowMs() - new Date(startTime)) / 1000);
+      const remaining = (duration * 60) - elapsed;
+      return remaining > 0 ? remaining : 0;
+    }
+
+    const remaining = Math.floor((expiryMs - getServerNowMs()) / 1000);
     return remaining > 0 ? remaining : 0;
-  }, [duration, startTime]);
+  }, [duration, startTime, expiresAt, getServerNowMs]);
 
   const [timeLeft, setTimeLeft] = useState(getRemainingTime);
 
@@ -15,7 +36,10 @@ const Timer = ({ duration, onTimeUp, startTime }) => {
         const remaining = getRemainingTime();
         if (remaining <= 0) {
           clearInterval(timer);
-          onTimeUp();
+          if (!hasTimedOutRef.current) {
+            hasTimedOutRef.current = true;
+            onTimeUp();
+          }
           return 0;
         }
         return remaining;
@@ -24,7 +48,10 @@ const Timer = ({ duration, onTimeUp, startTime }) => {
 
     if (getRemainingTime() <= 0) {
       clearInterval(timer);
-      onTimeUp();
+      if (!hasTimedOutRef.current) {
+        hasTimedOutRef.current = true;
+        onTimeUp();
+      }
     }
 
     return () => clearInterval(timer);

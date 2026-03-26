@@ -68,7 +68,7 @@ exports.getUser = async (req, res, next) => {
 // @access  Private (Admin/SuperUser)
 exports.updateUser = async (req, res, next) => {
   try {
-    const { firstname, lastname, email, isActive } = req.body;
+    const { firstname, lastname, sbu, group, email, username, password, isActive } = req.body;
 
     const user = await User.findById(req.params.id);
 
@@ -89,8 +89,12 @@ exports.updateUser = async (req, res, next) => {
 
     // Update fields
     if (firstname) user.firstname = firstname;
-    if (lastname) user.lastname = lastname;
+    if (lastname !== undefined) user.lastname = lastname;
+    if (sbu !== undefined) user.sbu = sbu;
+    if (group !== undefined) user.group = group;
     if (email) user.email = email;
+    if (username) user.username = username;
+    if (password) user.password = password;
     if (isActive !== undefined) user.isActive = isActive;
 
     await user.save();
@@ -226,26 +230,112 @@ exports.bulkCreateExaminees = async (req, res, next) => {
       });
     }
 
-    const usersToCreate = parseResult.data.map(row => ({
+    const normalizedRows = parseResult.data.map((row, index) => ({
+      index,
       firstname: row.firstname.trim(),
       lastname: row.lastname.trim(),
+      sbu: row.sbu ? row.sbu.trim() : '',
+      group: row.group ? row.group.trim() : '',
       username: row.username.toLowerCase().trim(),
-      email: row.email?.toLowerCase().trim(),
+      email: row.email?.toLowerCase().trim() || '',
       password: row.password,
       role: 'examinee',
       createdBy: req.user._id,
       isActive: true
     }));
 
-    // FASTEST: Bulk insert, skip duplicates
-    const result = await User.insertMany(usersToCreate, {
-      ordered: false,  // Continue even if one fails
-      rawResult: true
-    });
+    const duplicateDetails = [];
+    const seenUsernames = new Set();
+    const seenEmails = new Set();
+    const candidateRows = [];
 
-    // Count successes
-    const insertedCount = result.insertedIds ? Object.keys(result.insertedIds).length : 0;
-    const duplicateCount = usersToCreate.length - insertedCount;
+    for (const row of normalizedRows) {
+      const reasons = [];
+
+      if (seenUsernames.has(row.username)) {
+        reasons.push('duplicate username in uploaded file');
+      } else {
+        seenUsernames.add(row.username);
+      }
+
+      if (row.email) {
+        if (seenEmails.has(row.email)) {
+          reasons.push('duplicate email in uploaded file');
+        } else {
+          seenEmails.add(row.email);
+        }
+      }
+
+      if (reasons.length > 0) {
+        duplicateDetails.push({
+          row: row.index + 2,
+          username: row.username,
+          email: row.email || '',
+          reason: reasons.join(', ')
+        });
+        continue;
+      }
+
+      candidateRows.push(row);
+    }
+
+    const usernames = candidateRows.map((row) => row.username);
+    const emails = candidateRows.map((row) => row.email).filter(Boolean);
+
+    const existingUsers = await User.find({
+      $or: [
+        ...(usernames.length > 0 ? [{ username: { $in: usernames } }] : []),
+        ...(emails.length > 0 ? [{ email: { $in: emails } }] : [])
+      ]
+    }).select('username email');
+
+    const existingUsernames = new Set(existingUsers.map((user) => String(user.username || '').toLowerCase()));
+    const existingEmails = new Set(existingUsers.map((user) => String(user.email || '').toLowerCase()).filter(Boolean));
+
+    const usersToCreate = [];
+
+    for (const row of candidateRows) {
+      const reasons = [];
+
+      if (existingUsernames.has(row.username)) {
+        reasons.push('username already exists');
+      }
+
+      if (row.email && existingEmails.has(row.email)) {
+        reasons.push('email already exists');
+      }
+
+      if (reasons.length > 0) {
+        duplicateDetails.push({
+          row: row.index + 2,
+          username: row.username,
+          email: row.email || '',
+          reason: reasons.join(', ')
+        });
+        continue;
+      }
+
+      usersToCreate.push({
+        firstname: row.firstname,
+        lastname: row.lastname,
+        sbu: row.sbu || undefined,
+        group: row.group || undefined,
+        username: row.username,
+        email: row.email || undefined,
+        password: row.password,
+        role: row.role,
+        createdBy: row.createdBy,
+        isActive: row.isActive
+      });
+    }
+
+    let insertedCount = 0;
+    if (usersToCreate.length > 0) {
+      const insertedUsers = await User.insertMany(usersToCreate, {
+        ordered: true
+      });
+      insertedCount = insertedUsers.length;
+    }
 
     // Cleanup
     await fs.unlink(req.file.path);
@@ -254,9 +344,10 @@ exports.bulkCreateExaminees = async (req, res, next) => {
       success: true,
       message: `Bulk upload completed!`,
       created: insertedCount,
-      skipped: duplicateCount,
-      total: usersToCreate.length,
-      tip: duplicateCount > 0 ? 'Skipped rows had duplicate username/email' : 'All users created!'
+      skipped: duplicateDetails.length,
+      total: normalizedRows.length,
+      tip: duplicateDetails.length > 0 ? 'Skipped rows had duplicate username/email' : 'All users created!',
+      skippedRows: duplicateDetails.slice(0, 50)
     });
 
   } catch (error) {
@@ -265,7 +356,7 @@ exports.bulkCreateExaminees = async (req, res, next) => {
 
     res.status(500).json({
       success: false,
-      message: 'Server error during upload',
+      message: error.message || 'Server error during upload',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }

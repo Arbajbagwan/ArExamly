@@ -8,8 +8,10 @@ const {
   createQuestion,
   updateQuestion,
   deleteQuestion,
+  bulkDeleteQuestions,
+  bulkActivateQuestions,
   bulkCreateQuestions,
-  getQuestionStats
+  getQuestionStats,
 } = require('../controllers/questionController');
 const { protect } = require('../middleware/authMiddleware');
 const { restrictTo } = require('../middleware/roleMiddleware');
@@ -43,6 +45,16 @@ router.route('/')
 
 router.route('/stats')
   .get(getQuestionStats);
+
+router.post('/bulk-delete', bulkDeleteQuestions);
+router.post('/bulk-activate', bulkActivateQuestions);
+
+router.post('/upload-image', (req, res) => {
+  return res.status(410).json({
+    success: false,
+    message: 'Question image upload is disabled. Use editor text or hosted image URLs.'
+  });
+});
 
 router.route('/bulk-upload')
   .post(upload.single('file'), bulkCreateQuestions);
