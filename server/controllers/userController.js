@@ -1,5 +1,6 @@
 const User = require('../models/User');
 const { parseExamineesExcel } = require('../utils/excelParser');
+const { createJob, updateJob, getJob, canAccessJob } = require('../utils/uploadJobStore');
 const fs = require('fs').promises;
 
 // @desc    Get all users (filtered by role)
@@ -209,157 +210,215 @@ exports.bulkActivateUsers = async (req, res) => {
   });
 };
 
-// @desc    Bulk create examinees from Excel
+const processExamineeBulkUpload = async ({ filePath, userId }) => {
+  const parseResult = await parseExamineesExcel(filePath);
+
+  if (!parseResult.success) {
+    return {
+      success: false,
+      message: 'Invalid Excel format',
+      errors: parseResult.errors || []
+    };
+  }
+
+  const normalizedRows = parseResult.data.map((row, index) => ({
+    index,
+    firstname: row.firstname.trim(),
+    lastname: row.lastname.trim(),
+    sbu: row.sbu ? row.sbu.trim() : '',
+    group: row.group ? row.group.trim() : '',
+    username: row.username.toLowerCase().trim(),
+    email: row.email?.toLowerCase().trim() || '',
+    password: row.password,
+    role: 'examinee',
+    createdBy: userId,
+    isActive: true
+  }));
+
+  const duplicateDetails = [];
+  const seenUsernames = new Set();
+  const seenEmails = new Set();
+  const candidateRows = [];
+
+  for (const row of normalizedRows) {
+    const reasons = [];
+
+    if (seenUsernames.has(row.username)) {
+      reasons.push('duplicate username in uploaded file');
+    } else {
+      seenUsernames.add(row.username);
+    }
+
+    if (row.email) {
+      if (seenEmails.has(row.email)) {
+        reasons.push('duplicate email in uploaded file');
+      } else {
+        seenEmails.add(row.email);
+      }
+    }
+
+    if (reasons.length > 0) {
+      duplicateDetails.push({
+        row: row.index + 2,
+        username: row.username,
+        email: row.email || '',
+        reason: reasons.join(', ')
+      });
+      continue;
+    }
+
+    candidateRows.push(row);
+  }
+
+  const usernames = candidateRows.map((row) => row.username);
+  const emails = candidateRows.map((row) => row.email).filter(Boolean);
+
+  const existingUsers = await User.find({
+    $or: [
+      ...(usernames.length > 0 ? [{ username: { $in: usernames } }] : []),
+      ...(emails.length > 0 ? [{ email: { $in: emails } }] : [])
+    ]
+  }).select('username email');
+
+  const existingUsernames = new Set(existingUsers.map((user) => String(user.username || '').toLowerCase()));
+  const existingEmails = new Set(existingUsers.map((user) => String(user.email || '').toLowerCase()).filter(Boolean));
+
+  const usersToCreate = [];
+
+  for (const row of candidateRows) {
+    const reasons = [];
+
+    if (existingUsernames.has(row.username)) {
+      reasons.push('username already exists');
+    }
+
+    if (row.email && existingEmails.has(row.email)) {
+      reasons.push('email already exists');
+    }
+
+    if (reasons.length > 0) {
+      duplicateDetails.push({
+        row: row.index + 2,
+        username: row.username,
+        email: row.email || '',
+        reason: reasons.join(', ')
+      });
+      continue;
+    }
+
+    usersToCreate.push({
+      firstname: row.firstname,
+      lastname: row.lastname,
+      sbu: row.sbu || undefined,
+      group: row.group || undefined,
+      username: row.username,
+      email: row.email || undefined,
+      password: row.password,
+      role: row.role,
+      createdBy: row.createdBy,
+      isActive: row.isActive
+    });
+  }
+
+  let insertedCount = 0;
+  if (usersToCreate.length > 0) {
+    const insertedUsers = await User.insertMany(usersToCreate, {
+      ordered: true
+    });
+    insertedCount = insertedUsers.length;
+  }
+
+  return {
+    success: true,
+    message: 'Bulk upload completed!',
+    created: insertedCount,
+    skipped: duplicateDetails.length,
+    total: normalizedRows.length,
+    tip: duplicateDetails.length > 0 ? 'Skipped rows had duplicate username/email' : 'All users created!',
+    skippedRows: duplicateDetails.slice(0, 50)
+  };
+};
+
+// @desc    Queue bulk create examinees from Excel
 // @route   POST /api/users/bulk-upload
 // @access  Private (SuperUser)
-// BEST METHOD: insertMany + ordered: false
-exports.bulkCreateExaminees = async (req, res, next) => {
+exports.startBulkCreateExaminees = async (req, res, next) => {
   if (!req.file) {
     return res.status(400).json({ success: false, message: 'Please upload an Excel file' });
   }
 
   try {
-    const parseResult = await parseExamineesExcel(req.file.path);
+    const jobId = createJob({ type: 'users', ownerId: req.user._id });
+    updateJob(jobId, { status: 'processing' });
 
-    if (!parseResult.success) {
-      await fs.unlink(req.file.path);
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid Excel format',
-        errors: parseResult.errors
-      });
-    }
+    const filePath = req.file.path;
+    const userId = req.user._id;
 
-    const normalizedRows = parseResult.data.map((row, index) => ({
-      index,
-      firstname: row.firstname.trim(),
-      lastname: row.lastname.trim(),
-      sbu: row.sbu ? row.sbu.trim() : '',
-      group: row.group ? row.group.trim() : '',
-      username: row.username.toLowerCase().trim(),
-      email: row.email?.toLowerCase().trim() || '',
-      password: row.password,
-      role: 'examinee',
-      createdBy: req.user._id,
-      isActive: true
-    }));
-
-    const duplicateDetails = [];
-    const seenUsernames = new Set();
-    const seenEmails = new Set();
-    const candidateRows = [];
-
-    for (const row of normalizedRows) {
-      const reasons = [];
-
-      if (seenUsernames.has(row.username)) {
-        reasons.push('duplicate username in uploaded file');
-      } else {
-        seenUsernames.add(row.username);
-      }
-
-      if (row.email) {
-        if (seenEmails.has(row.email)) {
-          reasons.push('duplicate email in uploaded file');
-        } else {
-          seenEmails.add(row.email);
-        }
-      }
-
-      if (reasons.length > 0) {
-        duplicateDetails.push({
-          row: row.index + 2,
-          username: row.username,
-          email: row.email || '',
-          reason: reasons.join(', ')
+    setImmediate(async () => {
+      try {
+        const result = await processExamineeBulkUpload({ filePath, userId });
+        updateJob(jobId, {
+          status: result.success ? 'completed' : 'failed',
+          result,
+          error: result.success ? null : result.message
         });
-        continue;
-      }
-
-      candidateRows.push(row);
-    }
-
-    const usernames = candidateRows.map((row) => row.username);
-    const emails = candidateRows.map((row) => row.email).filter(Boolean);
-
-    const existingUsers = await User.find({
-      $or: [
-        ...(usernames.length > 0 ? [{ username: { $in: usernames } }] : []),
-        ...(emails.length > 0 ? [{ email: { $in: emails } }] : [])
-      ]
-    }).select('username email');
-
-    const existingUsernames = new Set(existingUsers.map((user) => String(user.username || '').toLowerCase()));
-    const existingEmails = new Set(existingUsers.map((user) => String(user.email || '').toLowerCase()).filter(Boolean));
-
-    const usersToCreate = [];
-
-    for (const row of candidateRows) {
-      const reasons = [];
-
-      if (existingUsernames.has(row.username)) {
-        reasons.push('username already exists');
-      }
-
-      if (row.email && existingEmails.has(row.email)) {
-        reasons.push('email already exists');
-      }
-
-      if (reasons.length > 0) {
-        duplicateDetails.push({
-          row: row.index + 2,
-          username: row.username,
-          email: row.email || '',
-          reason: reasons.join(', ')
+      } catch (error) {
+        updateJob(jobId, {
+          status: 'failed',
+          error: error.message,
+          result: {
+            success: false,
+            message: error.message || 'Server error during upload'
+          }
         });
-        continue;
+      } finally {
+        await fs.unlink(filePath).catch(() => {});
       }
-
-      usersToCreate.push({
-        firstname: row.firstname,
-        lastname: row.lastname,
-        sbu: row.sbu || undefined,
-        group: row.group || undefined,
-        username: row.username,
-        email: row.email || undefined,
-        password: row.password,
-        role: row.role,
-        createdBy: row.createdBy,
-        isActive: row.isActive
-      });
-    }
-
-    let insertedCount = 0;
-    if (usersToCreate.length > 0) {
-      const insertedUsers = await User.insertMany(usersToCreate, {
-        ordered: true
-      });
-      insertedCount = insertedUsers.length;
-    }
-
-    // Cleanup
-    await fs.unlink(req.file.path);
-
-    res.status(201).json({
-      success: true,
-      message: `Bulk upload completed!`,
-      created: insertedCount,
-      skipped: duplicateDetails.length,
-      total: normalizedRows.length,
-      tip: duplicateDetails.length > 0 ? 'Skipped rows had duplicate username/email' : 'All users created!',
-      skippedRows: duplicateDetails.slice(0, 50)
     });
 
+    return res.status(202).json({
+      success: true,
+      message: 'Upload accepted. Processing in background.',
+      jobId,
+      status: 'processing'
+    });
   } catch (error) {
     console.error('Bulk upload error:', error);
-    try { await fs.unlink(req.file.path); } catch { }
+    try { await fs.unlink(req.file.path); } catch {}
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: error.message || 'Server error during upload',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
+};
+
+// @desc    Get examinee bulk upload job status
+// @route   GET /api/users/bulk-upload/:jobId
+// @access  Private (Admin/SuperUser)
+exports.getBulkCreateExamineesStatus = async (req, res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+
+  const job = getJob(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ success: false, message: 'Job not found' });
+  }
+
+  if (!canAccessJob(job, req.user)) {
+    return res.status(403).json({ success: false, message: 'Not authorized to access this job' });
+  }
+
+  return res.status(200).json({
+    success: true,
+    jobId: job.id,
+    type: job.type,
+    status: job.status,
+    result: job.result,
+    error: job.error
+  });
 };
 
 // @desc    Reset user password

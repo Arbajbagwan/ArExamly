@@ -38,6 +38,36 @@ const BulkUpload = ({ type, onSuccess, subjects = [] }) => {
     };
   };
 
+  const pollUploadJob = async (endpoint, jobId, startedAt) => {
+    const maxPolls = 600; // ~10 minutes at 1s interval
+    for (let i = 0; i < maxPolls; i += 1) {
+      const delayMs = i < 15 ? 1000 : 2000;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      const statusRes = await API.get(`${endpoint}/${jobId}`, {
+        headers: {
+          'Cache-Control': 'no-cache',
+          Pragma: 'no-cache'
+        }
+      });
+      const { status, result: jobResult, error } = statusRes.data || {};
+
+      if (status === 'completed' || status === 'failed') {
+        setElapsedMs(Date.now() - startedAt);
+        if (status === 'failed') {
+          const message = error || jobResult?.message || 'Upload failed';
+          throw new Error(message);
+        }
+        return normalizeUploadResult(jobResult || {});
+      }
+
+      setIsServerProcessing(true);
+      setProgress(100);
+      setStatusText('Upload complete. Processing rows on server...');
+    }
+
+    throw new Error('Upload processing timed out. Please check again in a moment.');
+  };
+
   const handleFileChange = (e) => {
     setFile(e.target.files[0]);
     setResult(null);
@@ -98,8 +128,17 @@ const BulkUpload = ({ type, onSuccess, subjects = [] }) => {
       });
 
       setProgress(100);
-      setElapsedMs(Date.now() - startedAt);
-      const normalized = normalizeUploadResult(res.data);
+      let normalized;
+
+      if (res.data?.jobId) {
+        setIsServerProcessing(true);
+        setStatusText('Upload complete. Processing rows on server...');
+        normalized = await pollUploadJob(endpoint, res.data.jobId, startedAt);
+      } else {
+        setElapsedMs(Date.now() - startedAt);
+        normalized = normalizeUploadResult(res.data);
+      }
+
       setResult(normalized);
       setStatusText('Upload processed. Refreshing list...');
       await showAlert(
@@ -113,7 +152,7 @@ const BulkUpload = ({ type, onSuccess, subjects = [] }) => {
       setStatusText('Completed.');
     } catch (err) {
       setStatusText('Upload failed.');
-      await showAlert(err.response?.data?.message || 'Upload failed', { title: 'Upload Failed' });
+      await showAlert(err.response?.data?.message || err.message || 'Upload failed', { title: 'Upload Failed' });
     } finally {
       setUploading(false);
       setIsServerProcessing(false);

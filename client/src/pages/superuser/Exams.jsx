@@ -134,6 +134,13 @@ const Exams = () => {
   };
 
   const clamp = (n, min, max) => Math.min(Math.max(n, min), max);
+  const attemptHasTheory = (attempt) => (attempt?.answers || []).some((ans) => {
+    const q = ans?.question;
+    if (!q) return false;
+    if (q.type === 'theory') return true;
+    if (q.type === 'passage') return (q.subQuestions || []).some((sq) => sq.type === 'theory');
+    return false;
+  });
 
   // poolCounts: compute based on selected filters (subjectIds, difficulty, topic)
   const poolCounts = useMemo(() => {
@@ -812,7 +819,7 @@ const Exams = () => {
       'Username': attempt.examinee?.username || '-',
       'Marks Obtained': attempt.totalMarksObtained || 0,
       'Total Marks': exam.totalMarks || 100,
-      'Percentage': (attempt.status === 'not_attempted' || attempt.status === 'in-progress' || attempt.status === 'submitted' || attempt.status === 'auto-submitted')
+      'Percentage': (attempt.status === 'not_attempted' || attempt.status === 'in-progress' || attempt.status === 'submitted' || (attempt.status === 'auto-submitted' && attemptHasTheory(attempt)))
         ? '-'
         : attempt.percentage
             ? attempt.percentage.toFixed(2) + '%'
@@ -821,7 +828,7 @@ const Exams = () => {
         ? 'NOT ATTEMPTED'
         : attempt.status === 'in-progress'
           ? 'IN PROGRESS'
-          : (attempt.status === 'submitted' || attempt.status === 'auto-submitted')
+          : (attempt.status === 'submitted' || (attempt.status === 'auto-submitted' && attemptHasTheory(attempt)))
           ? 'EVALUATION PENDING'
           : isPass(attempt)
             ? 'PASS'
@@ -2628,7 +2635,8 @@ const Exams = () => {
                       const totalObtained = Number(attempt.totalMarksObtained ?? 0);
                       const isNotAttempted = attempt.status === 'not_attempted';
                       const isInProgress = attempt.status === 'in-progress';
-                      const isPendingEvaluation = attempt.status === 'submitted' || attempt.status === 'auto-submitted';
+                      const hasTheoryInAttempt = attemptHasTheory(attempt);
+                      const isPendingEvaluation = attempt.status === 'submitted' || (attempt.status === 'auto-submitted' && hasTheoryInAttempt);
                       const marks = isInProgress
                         ? `${totalObtained}/${totalPossible} (live)`
                         : isPendingEvaluation
@@ -2680,7 +2688,7 @@ const Exams = () => {
                           </td>
                           <td>
                             <div className="flex items-center justify-center gap-2">
-                              {(attempt.status === 'submitted' || attempt.status === 'auto-submitted') && (
+                              {(attempt.status === 'submitted' || (attempt.status === 'auto-submitted' && hasTheoryInAttempt)) && (
                                 <button
                                   onClick={() => openEvaluateModal(attempt._id)}
                                   className="btn btn-primary btn-xs"

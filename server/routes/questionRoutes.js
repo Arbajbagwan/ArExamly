@@ -10,7 +10,8 @@ const {
   deleteQuestion,
   bulkDeleteQuestions,
   bulkActivateQuestions,
-  bulkCreateQuestions,
+  startBulkCreateQuestions,
+  getBulkCreateQuestionsStatus,
   getQuestionStats,
 } = require('../controllers/questionController');
 const { protect } = require('../middleware/authMiddleware');
@@ -57,7 +58,10 @@ router.post('/upload-image', (req, res) => {
 });
 
 router.route('/bulk-upload')
-  .post(upload.single('file'), bulkCreateQuestions);
+  .post(upload.single('file'), startBulkCreateQuestions);
+
+router.route('/bulk-upload/:jobId')
+  .get(getBulkCreateQuestionsStatus);
 
 router.route('/:id')
   .get(getQuestion)

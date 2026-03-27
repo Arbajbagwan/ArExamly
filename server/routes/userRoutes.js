@@ -7,7 +7,8 @@ const {
   getUser,
   updateUser,
   deleteUser,
-  bulkCreateExaminees,
+  startBulkCreateExaminees,
+  getBulkCreateExamineesStatus,
   resetPassword,
   bulkDeleteUsers,
   bulkActivateUsers
@@ -43,7 +44,10 @@ router.route('/')
   .get(getUsers);
 
 router.route('/bulk-upload')
-  .post(upload.single('file'), bulkCreateExaminees);
+  .post(upload.single('file'), startBulkCreateExaminees);
+
+router.route('/bulk-upload/:jobId')
+  .get(getBulkCreateExamineesStatus);
 
 router.post('/bulk-delete',
   protect,

@@ -2,6 +2,7 @@ const Question = require('../models/Question');
 const Subject = require('../models/Subject');
 const Passage = require('../models/Passage');
 const { parseQuestionsExcel } = require('../utils/excelParser');
+const { createJob, updateJob, getJob, canAccessJob } = require('../utils/uploadJobStore');
 const fs = require('fs').promises;
 
 const applyQuestionOwnerFilter = (req, filter = {}) => {
@@ -368,10 +369,53 @@ exports.bulkActivateQuestions = async (req, res, next) => {
   }
 };
 
-// @desc    Bulk create questions from Excel
+const processQuestionBulkUpload = async ({ filePath, subjectId, userId }) => {
+  const parseResult = parseQuestionsExcel(filePath);
+  if (!parseResult.success) {
+    return {
+      success: false,
+      message: 'Excel validation failed',
+      errors: parseResult.errors || []
+    };
+  }
+
+  const createdQuestions = [];
+  const failedQuestions = [];
+
+  for (const questionData of parseResult.data) {
+    try {
+      const question = await Question.create({
+        ...questionData,
+        subject: subjectId,
+        createdBy: userId
+      });
+      createdQuestions.push({
+        id: question._id,
+        question: `${String(question.question || '').substring(0, 50)}...`
+      });
+    } catch (error) {
+      failedQuestions.push({
+        question: `${String(questionData.question || '').substring(0, 50)}...`,
+        error: error.message
+      });
+    }
+  }
+
+  return {
+    success: true,
+    message: `Successfully created ${createdQuestions.length} questions`,
+    created: createdQuestions.length,
+    skipped: failedQuestions.length,
+    total: parseResult.data.length,
+    createdQuestions,
+    failedQuestions
+  };
+};
+
+// @desc    Queue bulk create questions from Excel
 // @route   POST /api/questions/bulk-upload
 // @access  Private (SuperUser)
-exports.bulkCreateQuestions = async (req, res, next) => {
+exports.startBulkCreateQuestions = async (req, res, next) => {
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -381,78 +425,93 @@ exports.bulkCreateQuestions = async (req, res, next) => {
     }
 
     const { subjectId } = req.body;
-
     if (!subjectId) {
-      await fs.unlink(req.file.path);
+      await fs.unlink(req.file.path).catch(() => {});
       return res.status(400).json({
         success: false,
         message: 'Please select a subject for bulk upload'
       });
     }
 
-    // Verify subject exists
     const subject = await Subject.findOne({
       _id: subjectId,
       ...(req.user.role === 'superuser' ? { createdBy: req.user._id } : {})
     });
     if (!subject) {
-      await fs.unlink(req.file.path);
+      await fs.unlink(req.file.path).catch(() => {});
       return res.status(400).json({
         success: false,
         message: 'Invalid subject selected'
       });
     }
 
-    const parseResult = parseQuestionsExcel(req.file.path);
+    const jobId = createJob({ type: 'questions', ownerId: req.user._id });
+    updateJob(jobId, { status: 'processing' });
 
-    if (!parseResult.success) {
-      await fs.unlink(req.file.path);
-      return res.status(400).json({
-        success: false,
-        message: 'Excel validation failed',
-        errors: parseResult.errors
-      });
-    }
+    const filePath = req.file.path;
+    const userId = req.user._id;
 
-    const createdQuestions = [];
-    const failedQuestions = [];
-
-    for (const questionData of parseResult.data) {
+    setImmediate(async () => {
       try {
-        const question = await Question.create({
-          ...questionData,
-          subject: subjectId,
-          createdBy: req.user._id
-        });
-        createdQuestions.push({
-          id: question._id,
-          question: question.question.substring(0, 50) + '...'
+        const result = await processQuestionBulkUpload({ filePath, subjectId, userId });
+        updateJob(jobId, {
+          status: result.success ? 'completed' : 'failed',
+          result,
+          error: result.success ? null : result.message
         });
       } catch (error) {
-        failedQuestions.push({
-          question: questionData.question.substring(0, 50) + '...',
-          error: error.message
+        updateJob(jobId, {
+          status: 'failed',
+          error: error.message,
+          result: {
+            success: false,
+            message: error.message || 'Server error during upload'
+          }
         });
+      } finally {
+        await fs.unlink(filePath).catch(() => {});
       }
-    }
+    });
 
-    await fs.unlink(req.file.path);
-
-    res.status(201).json({
+    return res.status(202).json({
       success: true,
-      message: `Successfully created ${createdQuestions.length} questions`,
-      created: createdQuestions.length,
-      skipped: failedQuestions.length,
-      total: parseResult.data.length,
-      createdQuestions,
-      failedQuestions
+      message: 'Upload accepted. Processing in background.',
+      jobId,
+      status: 'processing'
     });
   } catch (error) {
     if (req.file) {
-      await fs.unlink(req.file.path).catch(console.error);
+      await fs.unlink(req.file.path).catch(() => {});
     }
     next(error);
   }
+};
+
+// @desc    Get bulk upload job status
+// @route   GET /api/questions/bulk-upload/:jobId
+// @access  Private (Admin/SuperUser)
+exports.getBulkCreateQuestionsStatus = async (req, res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+
+  const job = getJob(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ success: false, message: 'Job not found' });
+  }
+
+  if (!canAccessJob(job, req.user)) {
+    return res.status(403).json({ success: false, message: 'Not authorized to access this job' });
+  }
+
+  return res.status(200).json({
+    success: true,
+    jobId: job.id,
+    type: job.type,
+    status: job.status,
+    result: job.result,
+    error: job.error
+  });
 };
 
 // @desc    Get question stats

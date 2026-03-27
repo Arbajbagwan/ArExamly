@@ -56,6 +56,18 @@ const shuffleArray = (arr) => {
   return out;
 };
 
+const attemptHasTheoryToEvaluate = (attempt) => {
+  return (attempt.answers || []).some((a) => {
+    const q = a.question;
+    if (!q) return false;
+    if (q.type === 'theory') return true;
+    if (q.type === 'passage') {
+      return (q.subQuestions || []).some((sq) => sq.type === 'theory');
+    }
+    return false;
+  });
+};
+
 const resolveAttemptExpiry = (attempt, exam) => {
   if (attempt?.expiresAt) {
     const parsed = new Date(attempt.expiresAt);
@@ -78,7 +90,6 @@ const autoSubmitAttemptIfExpired = async (attempt, examMeta) => {
   const expiresAt = resolveAttemptExpiry(attempt, examMeta);
   if (!expiresAt || Date.now() < expiresAt.getTime()) return false;
 
-  attempt.status = 'auto-submitted';
   attempt.submittedAt = new Date(expiresAt.getTime());
   attempt.expiresAt = expiresAt;
   attempt.timeSpent = Math.max(
@@ -86,6 +97,8 @@ const autoSubmitAttemptIfExpired = async (attempt, examMeta) => {
     Math.round((expiresAt.getTime() - new Date(attempt.startedAt).getTime()) / 1000)
   );
   await attempt.calculateMCQScore();
+  const hasTheory = attemptHasTheoryToEvaluate(attempt);
+  attempt.status = hasTheory ? 'auto-submitted' : 'evaluated';
   await attempt.save();
   return true;
 };
@@ -325,6 +338,20 @@ exports.startExam = async (req, res, next) => {
             { $project: { _id: 1, type: 1, options: 1, subQuestions: 1 } }
           ]);
           selectedQuestions = [...mcqs, ...theories, ...passages];
+
+          const requestedMcq = Number(conf.mcqCount || 0);
+          const requestedTheory = Number(conf.theoryCount || 0);
+          const requestedPassage = Number(conf.passageCount || 0);
+          if (
+            mcqs.length < requestedMcq ||
+            theories.length < requestedTheory ||
+            passages.length < requestedPassage
+          ) {
+            return res.status(400).json({
+              success: false,
+              message: 'Question pool is insufficient for configured random split. Please contact administrator.'
+            });
+          }
         } else {
           // Case 1: Any Type Mode
           selectedQuestions = await Question.aggregate([
@@ -332,6 +359,14 @@ exports.startExam = async (req, res, next) => {
             { $sample: { size: conf.totalQuestions } },
             { $project: { _id: 1, type: 1, options: 1, subQuestions: 1 } }
           ]);
+
+          const requestedTotal = Number(conf.totalQuestions || 0);
+          if (requestedTotal > 0 && selectedQuestions.length < requestedTotal) {
+            return res.status(400).json({
+              success: false,
+              message: 'Question pool is insufficient for configured random count. Please contact administrator.'
+            });
+          }
         }
       } else {
         // Manual Mode: use fixed questions and fetch only fields needed for attempt creation.
@@ -339,6 +374,13 @@ exports.startExam = async (req, res, next) => {
         selectedQuestions = await Question.find({ _id: { $in: fixedIds } })
           .select('_id type options subQuestions')
           .lean();
+      }
+
+      if (!Array.isArray(selectedQuestions) || selectedQuestions.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'No questions available for this exam. Please contact administrator.'
+        });
       }
 
       // Apply question-order shuffle for this attempt when enabled.
@@ -501,9 +543,12 @@ exports.saveAnswer = async (req, res, next) => {
     const exam = await Exam.findById(attempt.exam);
     const expiresAt = resolveAttemptExpiry(attempt, exam);
     if (expiresAt && Date.now() >= expiresAt.getTime()) {
-      attempt.status = 'auto-submitted';
       attempt.submittedAt = new Date(expiresAt.getTime());
       attempt.expiresAt = expiresAt;
+      attempt.timeSpent = Math.max(0, Math.round((expiresAt.getTime() - new Date(attempt.startedAt).getTime()) / 1000));
+      await attempt.calculateMCQScore();
+      const hasTheory = attemptHasTheoryToEvaluate(attempt);
+      attempt.status = hasTheory ? 'auto-submitted' : 'evaluated';
       await attempt.save();
       return res.status(400).json({ success: false, message: 'Time limit exceeded. Exam auto-submitted.' });
     }
@@ -571,11 +616,12 @@ exports.submitExam = async (req, res, next) => {
     const exam = await Exam.findById(attempt.exam).select('duration minimumAttemptQuestions');
     const expiresAt = resolveAttemptExpiry(attempt, exam);
     if (expiresAt && Date.now() >= expiresAt.getTime()) {
-      attempt.status = 'auto-submitted';
       attempt.submittedAt = new Date(expiresAt.getTime());
       attempt.timeSpent = Math.max(0, Math.round((expiresAt.getTime() - new Date(attempt.startedAt).getTime()) / 1000));
       attempt.expiresAt = expiresAt;
       await attempt.calculateMCQScore();
+      const hasTheory = attemptHasTheoryToEvaluate(attempt);
+      attempt.status = hasTheory ? 'auto-submitted' : 'evaluated';
       await attempt.save();
       return res.status(400).json({ success: false, message: 'Time limit exceeded. Exam auto-submitted.' });
     }
